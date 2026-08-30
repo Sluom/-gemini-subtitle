@@ -57,6 +57,190 @@ function isAssUrl(url) {
   return /\.(ass|ssa)(\?|$)/i.test(url);
 }
 
+// ============= تحليل/بناء ملفات الترجمة (srt <-> ass) =============
+// الهدف: استخراج التوقيت والنص بأنفسنا بالكود (بدون الاعتماد على الذكاء الاصطناعي
+// لضبط التوقيت أو بنية الملف)، ثم نرسل فقط النصوص المنطوقة للترجمة، ثم نعيد بناء
+// ملف ass صحيح دائمًا مع نفس التوقيت الأصلي بالضبط.
+
+// 00:01:23,456 -> 0:01:23.45  (تحويل توقيت srt إلى صيغة ass)
+function srtTimeToAss(t) {
+  const m = t.match(/(\d+):(\d{2}):(\d{2}),(\d{3})/);
+  if (!m) return '0:00:00.00';
+  const h = parseInt(m[1], 10);
+  const cs = Math.floor(parseInt(m[4], 10) / 10).toString().padStart(2, '0');
+  return `${h}:${m[2]}:${m[3]}.${cs}`;
+}
+
+function parseSrt(text) {
+  const blocks = text.replace(/\r/g, '').split(/\n\s*\n+/);
+  const cues = [];
+  for (const block of blocks) {
+    const lines = block.split('\n').filter(l => l.trim().length);
+    if (lines.length < 2) continue;
+    let idx = 0;
+    if (/^\d+$/.test(lines[0].trim())) idx = 1;
+    const timeLine = lines[idx] || '';
+    const tm = timeLine.match(/(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})/);
+    if (!tm) continue;
+    const text2 = lines.slice(idx + 1).join('\n');
+    if (!text2.trim()) continue;
+    cues.push({ start: srtTimeToAss(tm[1]), end: srtTimeToAss(tm[2]), text: text2 });
+  }
+  return cues;
+}
+
+const ASS_DEFAULT_HEADER = `[Script Info]
+ScriptType: v4.00+
+Collisions: Normal
+PlayDepth: 0
+WrapStyle: 0
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,28,&H00FFFFFF,&H000000FF,&H00000000,&H64000000,0,0,0,0,100,100,0,0,1,2,1,2,10,10,20,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+`;
+
+// يبني ملف ass صحيح من مصفوفة { start, end, text }
+function buildAssFromCues(cues) {
+  const lines = cues.map(c => `Dialogue: 0,${c.start},${c.end},Default,,0,0,0,,${String(c.text).replace(/\n/g, '\\N')}`);
+  return ASS_DEFAULT_HEADER + lines.join('\n') + '\n';
+}
+
+// يحلل ملف ass موجود: يستخرج رأس الملف (Script Info/Styles) كما هو، وكل سطر Dialogue
+// كـ { prefix, before[], text } بحيث نقدر نستبدل النص فقط ونحافظ على كل شيء آخر (التوقيت،
+// الستايل، أي تاغات override) كما هو تمامًا.
+function parseAss(text) {
+  const lines = text.replace(/\r/g, '').split('\n');
+  const eventsIdx = lines.findIndex(l => l.trim().toLowerCase() === '[events]');
+  if (eventsIdx === -1) return null;
+
+  let formatLine = null;
+  let formatIdx = -1;
+  for (let i = eventsIdx + 1; i < lines.length; i++) {
+    if (/^Format:/i.test(lines[i].trim())) { formatLine = lines[i]; formatIdx = i; break; }
+  }
+  if (!formatLine) return null;
+
+  const fields = formatLine.split(':').slice(1).join(':').split(',').map(s => s.trim());
+  if (!fields.length || fields[fields.length - 1].toLowerCase() !== 'text') return null;
+
+  const headerLines = lines.slice(0, formatIdx + 1);
+  const dialogues = [];
+  for (let i = formatIdx + 1; i < lines.length; i++) {
+    const line = lines[i];
+    const prefixMatch = line.match(/^(Dialogue|Comment):\s*/i);
+    if (!prefixMatch) continue;
+    const rest = line.slice(prefixMatch[0].length);
+    const parts = rest.split(',');
+    if (parts.length < fields.length) continue;
+    const before = parts.slice(0, fields.length - 1);
+    const textPart = parts.slice(fields.length - 1).join(',');
+    dialogues.push({ prefix: prefixMatch[1], before, text: textPart });
+  }
+  if (!dialogues.length) return null;
+  return { headerLines, dialogues };
+}
+
+// يرسل مصفوفة نصوص لمزود واحد ويطلب مصفوفة JSON مترجمة بنفس الطول (بدون توقيت،
+// نص منطوق فقط) - أوثق بكثير من طلب "حافظ على الصيغة" من نموذج نصي حر
+async function translateChunkJSON(texts, provider, key) {
+  const prompt = `Translate the following JSON array of ${texts.length} subtitle text lines into natural, accurate Arabic. Respond with ONLY a raw JSON array of exactly ${texts.length} strings, same order, no markdown fences, no explanation. If a line contains ASS/SSA override tags like {\\i1}, {\\an8}, etc., keep those tags exactly unchanged in place and translate only the visible spoken words.\n\nInput:\n${JSON.stringify(texts)}`;
+
+  try {
+    if (provider === 'gemini') {
+      const modelsToTry = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-pro'];
+      for (const m of modelsToTry) {
+        try {
+          const url = `https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${encodeURIComponent(key.trim())}`;
+          const r = await axios.post(url, {
+            contents: [{ parts: [{ text: prompt }] }],
+            generationConfig: { response_mime_type: 'application/json' }
+          }, { headers: { 'Content-Type': 'application/json' }, timeout: 30000 });
+          const raw = r.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (raw) {
+            const arr = JSON.parse(raw);
+            if (Array.isArray(arr) && arr.length === texts.length) return arr;
+          }
+        } catch (e) { logErr(`translateChunk:gemini:${m}`, e); }
+      }
+      return null;
+    }
+
+    if (provider === 'groq' || provider === 'openai') {
+      const isGroq = provider === 'groq';
+      const url = isGroq ? 'https://api.groq.com/openai/v1/chat/completions' : 'https://api.openai.com/v1/chat/completions';
+      const model = isGroq ? 'llama-3.3-70b-versatile' : 'gpt-4o-mini';
+      const body = { model, messages: [{ role: 'user', content: prompt }] };
+      if (!isGroq) body.response_format = { type: 'json_object' };
+      let r;
+      try {
+        r = await axios.post(url, body, { headers: { Authorization: `Bearer ${key.trim()}`, 'Content-Type': 'application/json' }, timeout: 30000 });
+      } catch (e) {
+        // بعض نماذج Groq قد ترفض response_format، هذا الاستدعاء أصلًا بدونه للـ groq
+        logErr(`translateChunk:${provider}`, e);
+        return null;
+      }
+      let raw = r.data?.choices?.[0]?.message?.content;
+      if (raw) {
+        raw = raw.trim().replace(/^```json/i, '').replace(/^```/, '').replace(/```\s*$/, '').trim();
+        // إن رجع الموديل { "translations": [...] } بدل مصفوفة خام، جرّب استخراجها
+        try {
+          const arr = JSON.parse(raw);
+          if (Array.isArray(arr) && arr.length === texts.length) return arr;
+          if (arr && Array.isArray(arr.translations) && arr.translations.length === texts.length) return arr.translations;
+        } catch (e) { /* تجاهل، سنرجع null */ }
+      }
+      return null;
+    }
+
+    if (provider === 'deepl') {
+      const isFree = key.trim().endsWith(':fx');
+      const dUrl = isFree ? 'https://api-free.deepl.com/v2/translate' : 'https://api.deepl.com/v2/translate';
+      const r = await axios.post(dUrl, {
+        text: texts,
+        target_lang: 'AR',
+        preserve_formatting: true
+      }, { headers: { Authorization: `DeepL-Auth-Key ${key.trim()}`, 'Content-Type': 'application/json' }, timeout: 30000 });
+      const translations = r.data?.translations || [];
+      if (translations.length === texts.length) return translations.map(t => t.text);
+      return null;
+    }
+  } catch (e) {
+    logErr(`translateChunk:${provider}`, e);
+  }
+  return null;
+}
+
+// يترجم مصفوفة نصوص كبيرة على دفعات (لتفادي حدود طول الطلب)، مع نفس ترتيب أولوية
+// المزودين المستخدم في بقية الكود: Gemini -> Groq -> DeepL -> OpenAI
+async function translateTextArray(texts, keys) {
+  if (!texts.length) return null;
+  const providers = [];
+  if (keys.geminiKey) providers.push({ name: 'gemini', key: keys.geminiKey });
+  if (keys.groqKey) providers.push({ name: 'groq', key: keys.groqKey });
+  if (keys.deeplKey) providers.push({ name: 'deepl', key: keys.deeplKey });
+  if (keys.openaiKey) providers.push({ name: 'openai', key: keys.openaiKey });
+  if (!providers.length) return null;
+
+  const CHUNK = 100;
+  const results = [];
+  for (let i = 0; i < texts.length; i += CHUNK) {
+    const chunk = texts.slice(i, i + CHUNK);
+    let done = null;
+    for (const p of providers) {
+      done = await translateChunkJSON(chunk, p.name, p.key);
+      if (done) break;
+    }
+    if (!done) return null; // فشلت الدفعة عبر كل المزودين -> نرجع null ليتم اللجوء للطريقة الاحتياطية
+    results.push(...done);
+  }
+  return results;
+}
+
 // مسار فحص وتجربة المفاتيح
 app.post('/test-key', async (req, res) => {
   const { provider, key } = req.body;
@@ -366,117 +550,171 @@ app.get(['/manifest.json', '/:config/manifest.json'], (req, res) => {
 });
 
 // مسار الترجمة الفورية بالذكاء الاصطناعي
-// يقبل أيضًا /translate/trans.srt أو /translate/trans.ass (نفس المنطق، فقط لتمييز الرابط بصريًا باسم "trans")
+// يقبل أيضًا /translate/trans.ass (اسم الرابط يحتوي "trans" لتمييزه بصريًا في القائمة)
+// المنهجية: نحلل توقيت/نص الملف الأصلي بأنفسنا بالكود (srt أو ass)، نرسل فقط النصوص
+// المنطوقة للترجمة (بدون توقيت)، ثم نبني ملف ass صحيح بنفس التوقيت الأصلي بالضبط.
+// هذا تفضيل لصيغة ass وليس إلزاميًا: إذا تعذّر التحليل البنيوي لأي سبب، نلجأ لترجمة
+// النص كاملًا كخطة احتياطية بدل فشل الطلب.
 app.get(['/translate', '/translate/:label'], async (req, res) => {
-  const { subUrl, geminiKey, groqKey, deeplKey, openaiKey, format } = req.query;
+  const { subUrl, geminiKey, groqKey, deeplKey, openaiKey } = req.query;
   if (!subUrl) return res.status(400).send("No subtitle URL");
 
+  const keys = { geminiKey, groqKey, deeplKey, openaiKey };
   const reqId = Math.random().toString(36).slice(2, 8);
   const t0 = Date.now();
   const elapsed = () => `${((Date.now() - t0) / 1000).toFixed(1)}s`;
 
   console.log(`[translate:${reqId}] بدء الطلب | gemini=${!!geminiKey} groq=${!!groqKey} deepl=${!!deeplKey} openai=${!!openaiKey} | src=${subUrl.slice(0, 90)}`);
 
+  // مؤقت زمني شامل: يبدأ من لحظة استلام الطلب (لحظة الضغط على رابط الترجمة) - إجباري 60 ثانية.
+  // لو انتهت المدة قبل ما تخلص الترجمة، نرجّع الملف الأصلي (غير مترجم) فورًا كخطة احتياطية
+  // بدل ما يتعلق المشغّل أو يفشل الطلب.
+  const TRANSLATE_TIMEOUT_MS = 60000;
+  let responded = false;
+  let latestOriginalText = null;
+
+  const timeoutTimer = setTimeout(() => {
+    if (responded) return;
+    responded = true;
+    console.log(`[translate:${reqId}] انتهت مهلة الـ ${TRANSLATE_TIMEOUT_MS / 1000}s، إرسال الملف الأصلي كخطة احتياطية | إجمالي الوقت: ${elapsed()}`);
+    if (latestOriginalText) {
+      res.setHeader('Content-Type', 'text/x-ssa; charset=utf-8');
+      res.send(latestOriginalText);
+    } else {
+      res.redirect(subUrl);
+    }
+  }, TRANSLATE_TIMEOUT_MS);
+
+  const finishOnce = (sendFn) => {
+    if (responded) return;
+    responded = true;
+    clearTimeout(timeoutTimer);
+    sendFn();
+  };
+
+  let originalText;
   try {
     const fetchStart = Date.now();
     const subRes = await axios.get(subUrl, { responseType: 'text', timeout: 15000 });
-    const originalText = subRes.data;
+    originalText = subRes.data;
+    latestOriginalText = originalText;
     console.log(`[translate:${reqId}] تم جلب الملف الأصلي خلال ${((Date.now() - fetchStart) / 1000).toFixed(1)}s (${originalText?.length || 0} حرف)`);
-
-    if (!originalText || typeof originalText !== 'string' || originalText.trim().length === 0) {
-      console.log(`[translate:${reqId}] الملف الأصلي فارغ، إرسال المصدر كما هو`);
-      res.setHeader('Content-Type', format === 'ass' ? 'text/x-ssa; charset=utf-8' : 'text/plain; charset=utf-8');
-      return res.redirect(subUrl);
-    }
-
-    let translatedText = null;
-
-    if (geminiKey && !translatedText) {
-      const modelsToTry = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-pro'];
-      for (const m of modelsToTry) {
-        const mStart = Date.now();
-        try {
-          const url = `https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${encodeURIComponent(geminiKey.trim())}`;
-          const gRes = await axios.post(url, {
-            contents: [{
-              parts: [{
-                text: `Translate this subtitle into accurate Arabic with exact timing preservation. Keep the exact same subtitle format/markup as the input (if it is ASS/SSA, keep all style, event and formatting tags intact and only translate the spoken text). Output ONLY the translated content:\n\n${originalText.slice(0, 30000)}`
-              }]
-            }]
-          }, { headers: { 'Content-Type': 'application/json' }, timeout: 25000 });
-          translatedText = gRes.data?.candidates?.[0]?.content?.parts?.[0]?.text;
-          console.log(`[translate:${reqId}] Gemini(${m}) ${translatedText ? 'نجح' : 'رجع بدون نص'} خلال ${((Date.now() - mStart) / 1000).toFixed(1)}s`);
-          if (translatedText) break;
-        } catch (e) {
-          console.log(`[translate:${reqId}] Gemini(${m}) فشل خلال ${((Date.now() - mStart) / 1000).toFixed(1)}s`);
-          logErr(`translate:gemini:${m}`, e);
-        }
-      }
-    }
-
-    if (groqKey && !translatedText) {
-      const gStart = Date.now();
-      try {
-        const groqRes = await axios.post('https://api.groq.com/openai/v1/chat/completions', {
-          model: 'llama-3.3-70b-versatile',
-          messages: [{
-            role: 'user',
-            content: `Translate this subtitle into accurate Arabic with exact timing preservation. Keep the exact same subtitle format/markup as the input (if it is ASS/SSA, keep all style, event and formatting tags intact and only translate the spoken text). Output ONLY the raw subtitle content without explanation:\n\n${originalText.slice(0, 30000)}`
-          }]
-        }, { headers: { Authorization: `Bearer ${groqKey.trim()}` }, timeout: 25000 });
-        translatedText = groqRes.data?.choices?.[0]?.message?.content;
-        console.log(`[translate:${reqId}] Groq ${translatedText ? 'نجح' : 'رجع بدون نص'} خلال ${((Date.now() - gStart) / 1000).toFixed(1)}s`);
-      } catch (e) {
-        console.log(`[translate:${reqId}] Groq فشل خلال ${((Date.now() - gStart) / 1000).toFixed(1)}s`);
-        logErr('translate:groq', e);
-      }
-    }
-
-    if (deeplKey && !translatedText) {
-      const dStart = Date.now();
-      try {
-        const isFree = deeplKey.trim().endsWith(':fx');
-        const dUrl = isFree ? 'https://api-free.deepl.com/v2/translate' : 'https://api.deepl.com/v2/translate';
-        const dRes = await axios.post(dUrl, {
-          text: [originalText.slice(0, 30000)],
-          target_lang: 'AR',
-          preserve_formatting: true
-        }, { headers: { Authorization: `DeepL-Auth-Key ${deeplKey.trim()}`, 'Content-Type': 'application/json' }, timeout: 25000 });
-        translatedText = dRes.data?.translations?.[0]?.text;
-        console.log(`[translate:${reqId}] DeepL ${translatedText ? 'نجح' : 'رجع بدون نص'} خلال ${((Date.now() - dStart) / 1000).toFixed(1)}s`);
-      } catch (e) {
-        console.log(`[translate:${reqId}] DeepL فشل خلال ${((Date.now() - dStart) / 1000).toFixed(1)}s`);
-        logErr('translate:deepl', e);
-      }
-    }
-
-    if (openaiKey && !translatedText) {
-      const oStart = Date.now();
-      try {
-        const oRes = await axios.post('https://api.openai.com/v1/chat/completions', {
-          model: 'gpt-4o-mini',
-          messages: [{
-            role: 'user',
-            content: `Translate this subtitle into accurate Arabic with exact timing preservation. Keep the exact same subtitle format/markup as the input (if it is ASS/SSA, keep all style, event and formatting tags intact and only translate the spoken text). Output ONLY the raw subtitle content without explanation:\n\n${originalText.slice(0, 30000)}`
-          }]
-        }, { headers: { Authorization: `Bearer ${openaiKey.trim()}`, 'Content-Type': 'application/json' }, timeout: 25000 });
-        translatedText = oRes.data?.choices?.[0]?.message?.content;
-        console.log(`[translate:${reqId}] OpenAI ${translatedText ? 'نجح' : 'رجع بدون نص'} خلال ${((Date.now() - oStart) / 1000).toFixed(1)}s`);
-      } catch (e) {
-        console.log(`[translate:${reqId}] OpenAI فشل خلال ${((Date.now() - oStart) / 1000).toFixed(1)}s`);
-        logErr('translate:openai', e);
-      }
-    }
-
-    const finalResult = translatedText || originalText;
-    console.log(`[translate:${reqId}] ${translatedText ? 'تمت الترجمة' : 'تعذرت الترجمة، إرسال النص الأصلي'} | إجمالي الوقت: ${elapsed()}`);
-
-    res.setHeader('Content-Type', format === 'ass' ? 'text/x-ssa; charset=utf-8' : 'text/plain; charset=utf-8');
-    res.send(finalResult);
   } catch (err) {
     logErr('translate:fetchSub', err);
-    res.redirect(subUrl);
+    return finishOnce(() => res.redirect(subUrl));
   }
+
+  if (responded) return; // انتهت المهلة أثناء جلب الملف الأصلي
+
+  if (!originalText || typeof originalText !== 'string' || originalText.trim().length === 0) {
+    console.log(`[translate:${reqId}] الملف الأصلي فارغ، إرسال المصدر كما هو`);
+    return finishOnce(() => res.redirect(subUrl));
+  }
+
+  const isSourceAss = isAssUrl(subUrl) || /^\uFEFF?\[Script Info\]/im.test(originalText);
+
+  // 1) محاولة الترجمة البنيوية (توقيت مضبوط + إخراج ass صحيح دائمًا)
+  try {
+    const assParsed = isSourceAss ? parseAss(originalText) : null;
+    const srtParsed = assParsed ? null : parseSrt(originalText);
+
+    const cueTexts = assParsed ? assParsed.dialogues.map(d => d.text) : (srtParsed || []).map(c => c.text);
+
+    if (cueTexts.length) {
+      const translated = await translateTextArray(cueTexts, keys);
+      if (responded) return; // انتهت المهلة أثناء الترجمة البنيوية
+      if (translated && translated.length === cueTexts.length) {
+        let outputText;
+        if (assParsed) {
+          const outLines = assParsed.headerLines.slice();
+          assParsed.dialogues.forEach((d, i) => {
+            outLines.push(`${d.prefix}: ${d.before.join(',')},${translated[i]}`);
+          });
+          outputText = outLines.join('\n') + '\n';
+        } else {
+          outputText = buildAssFromCues(srtParsed.map((c, i) => ({ start: c.start, end: c.end, text: translated[i] })));
+        }
+        console.log(`[translate:${reqId}] ترجمة بنيوية ناجحة (${cueTexts.length} سطر) -> ass | إجمالي الوقت: ${elapsed()}`);
+        return finishOnce(() => {
+          res.setHeader('Content-Type', 'text/x-ssa; charset=utf-8');
+          res.send(outputText);
+        });
+      }
+      console.log(`[translate:${reqId}] فشلت الترجمة البنيوية عبر كل المزودين، اللجوء للخطة الاحتياطية`);
+    }
+  } catch (e) {
+    logErr('translate:structured', e);
+  }
+
+  if (responded) return; // انتهت المهلة قبل الوصول للخطة الاحتياطية
+
+  // 2) خطة احتياطية: ترجمة النص كاملًا كما كان سابقًا (بدون ضمان بنية ass صحيحة 100%)،
+  // نحاول قدر الإمكان إبقاء نفس الصيغة/التاغات عبر التعليمات فقط
+  let translatedText = null;
+  const wholeTextPrompt = (isSourceAss)
+    ? `Translate this ASS/SubStation Alpha subtitle file into accurate Arabic. Keep the file structure and all style/event tags and timing intact, translate only the visible spoken text in each Dialogue line. Output ONLY the translated file content:\n\n${originalText.slice(0, 30000)}`
+    : `Translate this subtitle into accurate Arabic with exact timing preservation. Output ONLY the translated content, same format as input:\n\n${originalText.slice(0, 30000)}`;
+
+  const providers = [];
+  if (geminiKey) providers.push('gemini');
+  if (groqKey) providers.push('groq');
+  if (deeplKey) providers.push('deepl');
+  if (openaiKey) providers.push('openai');
+
+  for (const provider of providers) {
+    if (responded) break; // انتهت المهلة أثناء المحاولات
+    if (translatedText) break;
+    try {
+      if (provider === 'gemini') {
+        const modelsToTry = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-pro'];
+        for (const m of modelsToTry) {
+          try {
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${encodeURIComponent(geminiKey.trim())}`;
+            const gRes = await axios.post(url, { contents: [{ parts: [{ text: wholeTextPrompt }] }] }, { headers: { 'Content-Type': 'application/json' }, timeout: 25000 });
+            translatedText = gRes.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+            if (translatedText) break;
+          } catch (e) { logErr(`translate:gemini:${m}`, e); }
+        }
+      } else if (provider === 'groq') {
+        const groqRes = await axios.post('https://api.groq.com/openai/v1/chat/completions', {
+          model: 'llama-3.3-70b-versatile',
+          messages: [{ role: 'user', content: wholeTextPrompt }]
+        }, { headers: { Authorization: `Bearer ${groqKey.trim()}` }, timeout: 25000 });
+        translatedText = groqRes.data?.choices?.[0]?.message?.content;
+      } else if (provider === 'deepl') {
+        const isFree = deeplKey.trim().endsWith(':fx');
+        const dUrl = isFree ? 'https://api-free.deepl.com/v2/translate' : 'https://api.deepl.com/v2/translate';
+        const dRes = await axios.post(dUrl, { text: [originalText.slice(0, 30000)], target_lang: 'AR', preserve_formatting: true }, { headers: { Authorization: `DeepL-Auth-Key ${deeplKey.trim()}`, 'Content-Type': 'application/json' }, timeout: 25000 });
+        translatedText = dRes.data?.translations?.[0]?.text;
+      } else if (provider === 'openai') {
+        const oRes = await axios.post('https://api.openai.com/v1/chat/completions', {
+          model: 'gpt-4o-mini',
+          messages: [{ role: 'user', content: wholeTextPrompt }]
+        }, { headers: { Authorization: `Bearer ${openaiKey.trim()}`, 'Content-Type': 'application/json' }, timeout: 25000 });
+        translatedText = oRes.data?.choices?.[0]?.message?.content;
+      }
+      console.log(`[translate:${reqId}] احتياطي:${provider} ${translatedText ? 'نجح' : 'رجع بدون نص'}`);
+    } catch (e) {
+      logErr(`translate:fallback:${provider}`, e);
+    }
+  }
+
+  if (responded) return; // انتهت المهلة قبل بناء الرد النهائي
+
+  const finalResult = translatedText || originalText;
+  // إن كان المصدر srt ولم ننجح بالترجمة البنيوية، نحوّله محليًا إلى ass صحيح على الأقل
+  // (حتى لو النص لم يُترجم لأي سبب) - تفضيل ass يبقى قائمًا كأفضل جهد ممكن
+  let outputText = finalResult;
+  if (!isSourceAss && translatedText) {
+    const cues = parseSrt(finalResult);
+    if (cues.length) outputText = buildAssFromCues(cues);
+  }
+
+  console.log(`[translate:${reqId}] ${translatedText ? 'تمت الترجمة (احتياطي)' : 'تعذرت الترجمة، إرسال النص الأصلي'} | إجمالي الوقت: ${elapsed()}`);
+  finishOnce(() => {
+    res.setHeader('Content-Type', 'text/x-ssa; charset=utf-8');
+    res.send(outputText);
+  });
 });
 
 // ============= تحويل معرفات الأنمي (kitsu / mal / anilist / tmdb / tvdb) بشكل ثنائي الاتجاه =============
@@ -636,12 +874,31 @@ async function resolveExternalId(rawId, tmdbKey) {
   return null;
 }
 
+// يتحقق أن رابط ملف الترجمة يعمل فعليًا (صالح للتشغيل) قبل اعتماده
+async function isSubtitleLinkWorking(url) {
+  try {
+    const head = await axios.head(url, { timeout: 6000, validateStatus: s => s >= 200 && s < 400 });
+    if (head.status >= 200 && head.status < 400) return true;
+  } catch (e) {
+    // بعض السيرفرات لا تدعم HEAD، نجرب GET خفيف كبديل بدل استبعاد الرابط ظلمًا
+    try {
+      const get = await axios.get(url, { timeout: 6000, responseType: 'text', maxContentLength: 4000 });
+      return get.status >= 200 && get.status < 400 && !!get.data;
+    } catch (e2) {
+      return false;
+    }
+  }
+  return false;
+}
+
 // جلب مباشر من OpenSubtitles.com الرسمي باستخدام مفتاح API الخاص بالمستخدم
+// عربي فقط (إجباري) + جلب جميع الملفات المتاحة لكل نتيجة (مو أول ملف بس) + التحقق
+// أن كل رابط شغال فعليًا (صالح للتشغيل) قبل إضافته للقائمة
 async function fetchOpenSubtitlesDirect(imdbId, season, episode, apiKey) {
   if (!apiKey) return [];
   try {
     const cleanId = imdbId.replace('tt', '');
-    const params = new URLSearchParams({ imdb_id: cleanId, languages: 'ar,en' });
+    const params = new URLSearchParams({ imdb_id: cleanId, languages: 'ar' }); // عربي فقط - إجباري
     if (season) params.set('season_number', season);
     if (episode) params.set('episode_number', episode);
 
@@ -658,19 +915,31 @@ async function fetchOpenSubtitlesDirect(imdbId, season, episode, apiKey) {
     const out = [];
     for (const item of items) {
       const attrs = item.attributes;
-      const fileUrl = attrs?.files?.[0]?.file_id;
-      if (!fileUrl) continue;
-      // نحتاج رابط تحميل فعلي عبر endpoint التحميل
-      try {
-        const dl = await axios.post('https://api.opensubtitles.com/api/v1/download',
-          { file_id: fileUrl },
-          { headers: { 'Api-Key': apiKey.trim(), 'Content-Type': 'application/json', 'User-Agent': 'NuvioSubtitlesApp v1.0.0' }, timeout: 8000 }
-        );
-        if (dl.data?.link) {
-          out.push({ url: dl.data.link, lang: attrs.language || 'en' });
+      const lang = (attrs?.language || '').toLowerCase();
+      if (lang && !lang.startsWith('ar')) continue; // تأكيد إضافي: عربي فقط
+
+      const files = attrs?.files || [];
+      for (const file of files) {
+        const fileId = file?.file_id;
+        if (!fileId) continue;
+        try {
+          const dl = await axios.post('https://api.opensubtitles.com/api/v1/download',
+            { file_id: fileId },
+            { headers: { 'Api-Key': apiKey.trim(), 'Content-Type': 'application/json', 'User-Agent': 'NuvioSubtitlesApp v1.0.0' }, timeout: 8000 }
+          );
+          const link = dl.data?.link;
+          if (!link) continue;
+
+          // فقط الروابط الصالحة للتشغيل فعليًا (إجباري)
+          const works = await isSubtitleLinkWorking(link);
+          if (works) {
+            out.push({ url: link, lang: 'ara' });
+          } else {
+            console.log(`[opensubtitles] تجاهل رابط لا يعمل: ${link.slice(0, 90)}`);
+          }
+        } catch (e) {
+          logErr('opensubtitles:download', e);
         }
-      } catch (e) {
-        logErr('opensubtitles:download', e);
       }
     }
     return out;
@@ -901,9 +1170,12 @@ const handleSubtitles = async (req, res) => {
     arabicSubs.sort(assFirst);
     nonArabicSubs.sort(assFirst);
 
-    // إضافة ترجمات الذكاء الاصطناعي (حتى 10 نتائج) - تُبنى بشكل منفصل لضمان عدم حذفها
+    // إضافة ترجمات الذكاء الاصطناعي - 10 نتائج إجبارية دائمًا (طالما فيه مصدر أجنبي
+    // واحد على الأقل + مفتاح AI) - تُبنى بشكل منفصل لضمان عدم حذفها
     // نختار المرشحين من لغات مختلفة قدر الإمكان (لا نكرر نفس اللغة إن وُجد بديل)،
     // مع تفضيل مصادر ASS أولًا، ونحافظ على نفس صيغة المصدر (ASS تبقى ASS) عند الترجمة.
+    // إذا كان عدد المصادر المتاحة أقل من 10، نكرر (ندور) على نفس المصادر بالتناوب
+    // حتى نصل للعدد المطلوب (10) دائمًا، بدل الاكتفاء بعدد المصادر الفعلي.
     const AI_MAX = 10;
     const hasAiKey = geminiKey || groqKey || deeplKey || openaiKey;
     const aiSubs = [];
@@ -921,14 +1193,19 @@ const handleSubtitles = async (req, res) => {
           rest.push(cand);
         }
       }
-      const candidates = [...primary, ...rest].slice(0, AI_MAX);
+      const orderedCandidates = [...primary, ...rest];
+
+      // إجبار العدد على 10 دائمًا عبر التكرار بالتناوب عند نقص المصادر
+      const candidates = [];
+      for (let i = 0; i < AI_MAX; i++) {
+        candidates.push(orderedCandidates[i % orderedCandidates.length]);
+      }
 
       candidates.forEach((cand, idx) => {
-        // نحافظ على نفس صيغة الملف المصدر (ASS يبقى ASS، غير ذلك SRT)
-        const ext = isAssUrl(cand.url) ? 'ass' : 'srt';
+        // الناتج دائمًا بصيغة ass (نبنيها بأنفسنا بالكود من التوقيت الأصلي، انظر /translate)
         // اسم الرابط يحتوي على "trans" عمدًا لتمييز الترجمة المُحوّلة بالذكاء الاصطناعي
         // عن الترجمات الجاهزة الأصلية عند عرضها داخل Nuvio
-        const aiProxyUrl = `${protocol}://${host}/translate/trans.${ext}?subUrl=${encodeURIComponent(cand.url)}&geminiKey=${encodeURIComponent(geminiKey)}&groqKey=${encodeURIComponent(groqKey)}&deeplKey=${encodeURIComponent(deeplKey)}&openaiKey=${encodeURIComponent(openaiKey)}&format=${encodeURIComponent(ext)}`;
+        const aiProxyUrl = `${protocol}://${host}/translate/trans.ass?subUrl=${encodeURIComponent(cand.url)}&geminiKey=${encodeURIComponent(geminiKey)}&groqKey=${encodeURIComponent(groqKey)}&deeplKey=${encodeURIComponent(deeplKey)}&openaiKey=${encodeURIComponent(openaiKey)}`;
 
         aiSubs.push({
           id: `trans_${idx + 1}`,
@@ -939,8 +1216,9 @@ const handleSubtitles = async (req, res) => {
       console.log(`[subtitles] ${type}/${targetId} -> تمت إضافة ${aiSubs.length} رابط ترجمة AI (trans) من لغات: ${candidates.map(c => c.lang).join(', ')}`);
     }
 
-    // بدون أي تحديد للعدد: كل الترجمات العادية (عربي + أجنبي، ASS مفضّلة أولًا) ثم ترجمات AI في الآخر
-    const combinedSubs = [...arabicSubs, ...nonArabicSubs, ...aiSubs];
+    // القائمة النهائية: العربية الأصلية فقط + ترجمات AI (نخفي الترجمات الأجنبية غير
+    // المترجمة تمامًا حتى لو كانت متوفرة - يبقى استخدامها الوحيد كمصدر لترجمة AI أعلاه)
+    const combinedSubs = [...arabicSubs, ...aiSubs];
 
     return res.json({ subtitles: combinedSubs });
   } catch (error) {
