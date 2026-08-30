@@ -51,6 +51,12 @@ function logErr(label, err) {
   console.error(`[${label}] فشل:`, msg);
 }
 
+// هل الرابط يشير إلى ملف بصيغة ass/ssa؟
+function isAssUrl(url) {
+  if (!url) return false;
+  return /\.(ass|ssa)(\?|$)/i.test(url);
+}
+
 // مسار فحص وتجربة المفاتيح
 app.post('/test-key', async (req, res) => {
   const { provider, key } = req.body;
@@ -151,13 +157,14 @@ app.get(['/', '/configure'], (req, res) => {
         .test-msg { font-size: 11px; margin-top: 4px; display: none; }
         .btn-install { width: 100%; padding: 14px; margin-top: 20px; border-radius: 8px; border: none; background: #0284c7; color: #fff; font-weight: bold; cursor: pointer; font-size: 15px; }
         .btn-install:hover { background: #0369a1; }
+        .hint { font-size: 11px; color: #64748b; margin-top: 6px; line-height: 1.5; }
       </style>
     </head>
     <body>
       <div class="card">
         <h2>Universal Subtitles & Gemini AI</h2>
 
-        <h3>🤖 محركات الذكاء الاصطناعي (حتى 5 نتائج في نهاية القائمة)</h3>
+        <h3>🤖 محركات الذكاء الاصطناعي (حتى 10 نتائج مترجمة من لغات متعددة، آخر القائمة)</h3>
         <div class="field-group">
           <div class="label-row">
             <label>مفتاح Google Gemini API:</label>
@@ -280,23 +287,10 @@ app.get(['/', '/configure'], (req, res) => {
           <div id="msgTmdb" class="test-msg"></div>
         </div>
 
-        <h3>⚙️ إعدادات العرض والأداء</h3>
-        <div class="field-group">
-          <label>أقصى عدد للترجمات المجلوبة:</label>
-          <select id="subLimit">
-            <option value="20">20 ترجمة (سريع)</option>
-            <option value="40" selected>40 ترجمة (متوازن ومثالي)</option>
-            <option value="100">100 ترجمة (شامل لجميع النسخ)</option>
-            <option value="999">بدون حد (جلب الكل)</option>
-          </select>
-        </div>
-
-        <div class="field-group">
-          <label>تنسيق ملف الترجمة المفضل للذكاء الاصطناعي:</label>
-          <select id="format">
-            <option value="ass">ASS (دقة ثابتة، محاذاة اللوحات)</option>
-            <option value="srt">SRT (افتراضي)</option>
-          </select>
+        <h3>⚙️ إعدادات العرض</h3>
+        <div class="hint">
+          يتم جلب كل الترجمات المتوفرة بدون حد أقصى، مع تفضيل ملفات ASS دائمًا.
+          ترجمات الذكاء الاصطناعي (حتى 10، من لغات متعددة إلى العربية، بصيغة ASS عند توفر مصدر ASS) تُضاف دومًا في آخر القائمة.
         </div>
 
         <button class="btn-install" onclick="install()">تثبيت / تحديث في Nuvio</button>
@@ -350,14 +344,10 @@ app.get(['/', '/configure'], (req, res) => {
           const subdlKey = document.getElementById('subdlKey').value.trim();
           const wyzieKey = document.getElementById('wyzieKey').value.trim();
           const tmdbKey = document.getElementById('tmdbKey').value.trim();
-          const limit = document.getElementById('subLimit').value;
-          const format = document.getElementById('format').value;
 
           const config = toBase64Url(JSON.stringify({
             geminiKey, groqKey, deeplKey, openaiKey, jimakuKey,
-            subsourceKey, openSubKey, subdlKey, wyzieKey, tmdbKey,
-            limit: parseInt(limit),
-            format
+            subsourceKey, openSubKey, subdlKey, wyzieKey, tmdbKey
           }));
 
           const manifestUrl = window.location.origin + '/' + config + '/manifest.json';
@@ -410,7 +400,7 @@ app.get(['/translate', '/translate/:label'], async (req, res) => {
           const gRes = await axios.post(url, {
             contents: [{
               parts: [{
-                text: `Translate this subtitle into accurate Arabic with exact timing preservation. Output ONLY the translated content:\n\n${originalText.slice(0, 30000)}`
+                text: `Translate this subtitle into accurate Arabic with exact timing preservation. Keep the exact same subtitle format/markup as the input (if it is ASS/SSA, keep all style, event and formatting tags intact and only translate the spoken text). Output ONLY the translated content:\n\n${originalText.slice(0, 30000)}`
               }]
             }]
           }, { headers: { 'Content-Type': 'application/json' }, timeout: 25000 });
@@ -431,7 +421,7 @@ app.get(['/translate', '/translate/:label'], async (req, res) => {
           model: 'llama-3.3-70b-versatile',
           messages: [{
             role: 'user',
-            content: `Translate this subtitle into accurate Arabic with exact timing preservation. Output ONLY the raw subtitle content without explanation:\n\n${originalText.slice(0, 30000)}`
+            content: `Translate this subtitle into accurate Arabic with exact timing preservation. Keep the exact same subtitle format/markup as the input (if it is ASS/SSA, keep all style, event and formatting tags intact and only translate the spoken text). Output ONLY the raw subtitle content without explanation:\n\n${originalText.slice(0, 30000)}`
           }]
         }, { headers: { Authorization: `Bearer ${groqKey.trim()}` }, timeout: 25000 });
         translatedText = groqRes.data?.choices?.[0]?.message?.content;
@@ -467,7 +457,7 @@ app.get(['/translate', '/translate/:label'], async (req, res) => {
           model: 'gpt-4o-mini',
           messages: [{
             role: 'user',
-            content: `Translate this subtitle into accurate Arabic with exact timing preservation. Output ONLY the raw subtitle content without explanation:\n\n${originalText.slice(0, 30000)}`
+            content: `Translate this subtitle into accurate Arabic with exact timing preservation. Keep the exact same subtitle format/markup as the input (if it is ASS/SSA, keep all style, event and formatting tags intact and only translate the spoken text). Output ONLY the raw subtitle content without explanation:\n\n${originalText.slice(0, 30000)}`
           }]
         }, { headers: { Authorization: `Bearer ${openaiKey.trim()}`, 'Content-Type': 'application/json' }, timeout: 25000 });
         translatedText = oRes.data?.choices?.[0]?.message?.content;
@@ -729,15 +719,12 @@ const handleSubtitles = async (req, res) => {
 
   if (!targetId) return res.json({ subtitles: [] });
 
-  let limit = 40;
   let geminiKey = '', groqKey = '', deeplKey = '', openaiKey = '';
   let subsourceKey = '', openSubKey = '', subdlKey = '', wyzieKey = '', tmdbKey = '';
-  let prefFormat = 'ass';
 
   if (req.params.config) {
     try {
       const p = JSON.parse(base64UrlDecode(req.params.config));
-      if (p.limit) limit = p.limit;
       if (p.geminiKey) geminiKey = p.geminiKey;
       if (p.groqKey) groqKey = p.groqKey;
       if (p.deeplKey) deeplKey = p.deeplKey;
@@ -747,7 +734,6 @@ const handleSubtitles = async (req, res) => {
       if (p.subdlKey) subdlKey = p.subdlKey;
       if (p.wyzieKey) wyzieKey = p.wyzieKey;
       if (p.tmdbKey) tmdbKey = p.tmdbKey;
-      if (p.format) prefFormat = p.format;
     } catch (e) {
       logErr('config:decode', e);
     }
@@ -834,7 +820,7 @@ const handleSubtitles = async (req, res) => {
 
   // AnimeTosho
   if (animeInfo?.title) {
-    const q = `${animeInfo.title} ${animeInfo.ep}`;
+    const q = `${animeInfo.title} ${animeInfo.absoluteEp || ''}`.trim();
     requests.push(
       axios.get(`https://animetosho.org/api/v1/search?q=${encodeURIComponent(q)}`, { timeout: 6000 })
         .then(r => {
@@ -910,17 +896,39 @@ const handleSubtitles = async (req, res) => {
 
     console.log(`[subtitles] ${type}/${targetId} -> عربي: ${arabicSubs.length}, أجنبي: ${nonArabicSubs.length}`);
 
-    // إضافة ترجمات الذكاء الاصطناعي (حتى 5 نتائج) - تُبنى بشكل منفصل لضمان عدم حذفها
-    // لاحقًا عند تقليم القائمة حسب الحد الأقصى (limit)
+    // ترتيب كل قائمة: تفضيل ملفات ASS أولًا (بدون أي حذف - الكل يبقى، فقط إعادة ترتيب)
+    const assFirst = (a, b) => (isAssUrl(b.url) ? 1 : 0) - (isAssUrl(a.url) ? 1 : 0);
+    arabicSubs.sort(assFirst);
+    nonArabicSubs.sort(assFirst);
+
+    // إضافة ترجمات الذكاء الاصطناعي (حتى 10 نتائج) - تُبنى بشكل منفصل لضمان عدم حذفها
+    // نختار المرشحين من لغات مختلفة قدر الإمكان (لا نكرر نفس اللغة إن وُجد بديل)،
+    // مع تفضيل مصادر ASS أولًا، ونحافظ على نفس صيغة المصدر (ASS تبقى ASS) عند الترجمة.
+    const AI_MAX = 10;
     const hasAiKey = geminiKey || groqKey || deeplKey || openaiKey;
     const aiSubs = [];
     if (nonArabicSubs.length > 0 && hasAiKey) {
-      const candidates = nonArabicSubs.slice(0, 5);
-      const ext = prefFormat === 'ass' ? 'ass' : 'srt';
+      // نرتب المرشحين: ASS أولاً، ثم حسب الترتيب الأصلي، مع تنويع اللغات
+      const sortedCandidates = [...nonArabicSubs].sort(assFirst);
+      const usedLangs = new Set();
+      const primary = [];
+      const rest = [];
+      for (const cand of sortedCandidates) {
+        if (!usedLangs.has(cand.lang)) {
+          usedLangs.add(cand.lang);
+          primary.push(cand);
+        } else {
+          rest.push(cand);
+        }
+      }
+      const candidates = [...primary, ...rest].slice(0, AI_MAX);
+
       candidates.forEach((cand, idx) => {
+        // نحافظ على نفس صيغة الملف المصدر (ASS يبقى ASS، غير ذلك SRT)
+        const ext = isAssUrl(cand.url) ? 'ass' : 'srt';
         // اسم الرابط يحتوي على "trans" عمدًا لتمييز الترجمة المُحوّلة بالذكاء الاصطناعي
         // عن الترجمات الجاهزة الأصلية عند عرضها داخل Nuvio
-        const aiProxyUrl = `${protocol}://${host}/translate/trans.${ext}?subUrl=${encodeURIComponent(cand.url)}&geminiKey=${encodeURIComponent(geminiKey)}&groqKey=${encodeURIComponent(groqKey)}&deeplKey=${encodeURIComponent(deeplKey)}&openaiKey=${encodeURIComponent(openaiKey)}&format=${encodeURIComponent(prefFormat)}`;
+        const aiProxyUrl = `${protocol}://${host}/translate/trans.${ext}?subUrl=${encodeURIComponent(cand.url)}&geminiKey=${encodeURIComponent(geminiKey)}&groqKey=${encodeURIComponent(groqKey)}&deeplKey=${encodeURIComponent(deeplKey)}&openaiKey=${encodeURIComponent(openaiKey)}&format=${encodeURIComponent(ext)}`;
 
         aiSubs.push({
           id: `trans_${idx + 1}`,
@@ -928,14 +936,11 @@ const handleSubtitles = async (req, res) => {
           lang: 'ara'
         });
       });
-      console.log(`[subtitles] ${type}/${targetId} -> تمت إضافة ${aiSubs.length} رابط ترجمة AI (trans)`);
+      console.log(`[subtitles] ${type}/${targetId} -> تمت إضافة ${aiSubs.length} رابط ترجمة AI (trans) من لغات: ${candidates.map(c => c.lang).join(', ')}`);
     }
 
-    // نضمن بقاء ترجمات AI ضمن النتيجة النهائية دائمًا: نقصّ الترجمات العادية فقط
-    // لإفساح المجال، ثم نُلحق ترجمات AI في النهاية بدون أي تقليم إضافي عليها
-    const regularSubs = [...arabicSubs, ...nonArabicSubs];
-    const regularLimit = Math.max(0, limit - aiSubs.length);
-    const combinedSubs = [...regularSubs.slice(0, regularLimit), ...aiSubs];
+    // بدون أي تحديد للعدد: كل الترجمات العادية (عربي + أجنبي، ASS مفضّلة أولًا) ثم ترجمات AI في الآخر
+    const combinedSubs = [...arabicSubs, ...nonArabicSubs, ...aiSubs];
 
     return res.json({ subtitles: combinedSubs });
   } catch (error) {
@@ -958,8 +963,10 @@ app.get('/subdl-extract', async (req, res) => {
 
     if (entries.length === 0) return res.status(404).send("No subtitle file found in archive");
 
-    // نفضّل ملف srt إن وجد، وإلا أول ملف متاح
-    const chosen = entries.find(e => e.entryName.toLowerCase().endsWith('.srt')) || entries[0];
+    // نفضّل ملف ass إن وجد، وإلا srt، وإلا أول ملف متاح
+    const chosen = entries.find(e => e.entryName.toLowerCase().endsWith('.ass'))
+      || entries.find(e => e.entryName.toLowerCase().endsWith('.srt'))
+      || entries[0];
     const content = chosen.getData().toString('utf8');
 
     const ext = chosen.entryName.split('.').pop().toLowerCase();
