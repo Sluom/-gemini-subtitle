@@ -779,6 +779,37 @@ async function resolveExternalId(rawId, tmdbKey) {
     const parts = rawId.split(':');
     const prefix = parts[0];
 
+    // ---- IMDB (tt...): نبحث بقاعدة الأنمي عن العمل المطابق لنستخرج معرف kitsu المكافئ ----
+    // معرف IMDB نفسه هو الجزء الأول (مثال tt1234567:1:5)، وليس بادئة منفصلة، لذلك نتحقق
+    // بـ regex بدل تطابق حرفي - بدون هذا، مصادر الأنمي المتخصصة (kitsunekko/subanime/...)
+    // التي تُفهرس فقط بمعرف kitsu لن تُستعلم أبدًا عند تشغيل الأنمي بمعرف IMDB.
+    if (/^tt\d+$/.test(prefix)) {
+      const imdbId = prefix;
+      const season = parts[1] ? parseInt(parts[1]) : null;
+      const episode = parts[2] ? parseInt(parts[2]) : null;
+
+      const map = await getAnimeListMap();
+      const entry = map.find(e => {
+        if (!e.imdb_id) return false;
+        const ids = Array.isArray(e.imdb_id) ? e.imdb_id : String(e.imdb_id).split(',').map(s => s.trim());
+        return ids.includes(imdbId);
+      });
+
+      if (!entry) return null; // العمل غير موجود بقاعدة الأنمي (على الأغلب ليس أنمي)
+
+      const kitsuId = entry.kitsu_id || null;
+      let absoluteEp = null;
+      if (season != null && episode != null) {
+        const offset = entry.episode_offset?.tvdb ?? 0;
+        absoluteEp = episode - offset;
+        if (absoluteEp < 1) absoluteEp = null; // إزاحة غير منطقية، تجاهلها
+      } else {
+        absoluteEp = 1; // فيلم أو معرف بدون موسم/حلقة
+      }
+
+      return { imdbId: null, kitsuId, absoluteEp };
+    }
+
     // ---- كيتسو / مايال / أنيليست: الترقيم مطلق أصلاً ----
     if (prefix === 'kitsu' || prefix === 'mal' || prefix === 'anilist') {
       const externalId = parts[1];
@@ -826,7 +857,6 @@ async function resolveExternalId(rawId, tmdbKey) {
 
       // ابحث في قاعدة بيانات الأنمي أولاً لمعرفة إن كان العمل أنمي، ولإيجاد معرف kitsu المطابق
       const map = await getAnimeListMap();
-      const idField = prefix === 'tmdb' ? null : 'tvdb_id';
       let entry = null;
 
       if (prefix === 'tvdb') {
@@ -835,6 +865,8 @@ async function resolveExternalId(rawId, tmdbKey) {
       } else {
         entry = map.find(e => String(e.themoviedb_id?.tv) === String(externalId) && (season == null || (e.season?.tmdb ?? 1) === season));
         if (!entry) entry = map.find(e => String(e.themoviedb_id?.tv) === String(externalId));
+        // بعض أفلام الأنمي مُفهرسة بحقل movie لا tv - نجربه كخيار احتياطي
+        if (!entry) entry = map.find(e => String(e.themoviedb_id?.movie) === String(externalId));
       }
 
       let imdbId = entry ? firstImdb(entry) : null;
@@ -1017,18 +1049,22 @@ const handleSubtitles = async (req, res) => {
   let animeInfo = null;
 
   const idPrefix = targetId.split(':')[0];
-  if (['kitsu', 'mal', 'anilist', 'tmdb', 'tvdb'].includes(idPrefix)) {
+  const isImdbPrefix = /^tt\d+$/.test(idPrefix);
+  if (isImdbPrefix || ['kitsu', 'mal', 'anilist', 'tmdb', 'tvdb'].includes(idPrefix)) {
     animeInfo = await resolveExternalId(targetId, tmdbKey);
 
     // 1) أضف المعرف المكافئ بصيغة IMDB (موسم/حلقة قياسي) - يخدم OpenSubtitles/SubDL/الأغلبية
+    // (لا ينطبق على معرفات IMDB نفسها، فهي أصلاً بهذه الصيغة)
     if (animeInfo?.imdbId) {
       targetIds.push(animeInfo.imdbId);
-    } else {
+    } else if (!isImdbPrefix) {
       console.log(`[resolve] تعذر تحويل المعرف ${targetId} إلى IMDB${['tmdb', 'tvdb'].includes(idPrefix) && !tmdbKey ? ' (مفتاح TMDB غير مُدخل في الإعدادات)' : ''}`);
     }
 
     // 2) أضف المعرف المكافئ بصيغة kitsu + رقم حلقة مطلق - يخدم مصادر الأنمي المتخصصة
     //    (تُفهرس عادة بالترقيم المطلق بغض النظر عن الموسم الرسمي على TVDB)
+    // هذا هو الجسر المفقود سابقًا لمعرفات IMDB: بدونه، مصادر مثل kitsunekko/subanime
+    // التي تفهرس فقط بمعرف kitsu كانت لا تُستعلم أبدًا عند تشغيل الأنمي بمعرف IMDB.
     if (animeInfo?.kitsuId && animeInfo?.absoluteEp && idPrefix !== 'kitsu') {
       const kitsuEquivalent = `kitsu:${animeInfo.kitsuId}:${animeInfo.absoluteEp}`;
       if (!targetIds.includes(kitsuEquivalent)) targetIds.push(kitsuEquivalent);
