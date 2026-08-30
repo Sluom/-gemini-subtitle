@@ -8,7 +8,7 @@ app.use(express.json());
 
 const manifest = {
   id: "org.nuvio.universal.gemini.subtitles",
-  version: "25.0.0",
+  version: "26.0.0",
   name: "Universal Subtitles & Gemini AI",
   description: "جلب الترجمات الشاملة المباشرة للأفلام والمسلسلات والأنمي مع الترجمة الفورية عبر الذكاء الاصطناعي",
   resources: [
@@ -109,7 +109,6 @@ app.get(['/', '/configure'], (req, res) => {
         .card { background: #1e293b; padding: 25px; border-radius: 16px; width: 100%; max-width: 530px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); border: 1px solid #334155; }
         h2 { color: #38bdf8; margin-top: 0; font-size: 20px; text-align: center; }
         h3 { color: #94a3b8; font-size: 14px; margin: 15px 0 8px; border-bottom: 1px solid #334155; padding-bottom: 4px; }
-        .notice-box { background: rgba(56, 189, 248, 0.1); border: 1px solid rgba(56, 189, 248, 0.3); padding: 12px; border-radius: 8px; font-size: 12px; color: #bae6fd; margin-bottom: 15px; line-height: 1.5; }
         .field-group { margin-bottom: 12px; }
         .label-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
         label { font-size: 13px; color: #cbd5e1; font-weight: 500; }
@@ -128,10 +127,6 @@ app.get(['/', '/configure'], (req, res) => {
     <body>
       <div class="card">
         <h2>Universal Subtitles & Gemini AI</h2>
-        
-        <div class="notice-box">
-          ⏳ <b>تنبيه:</b> السيرفر يعمل بروابط جلب مباشرة ومطابقة للمعايير لضمان ظهور نصوص الترجمة فورياً وبدون انقطاع.
-        </div>
 
         <h3>🤖 محركات الذكاء الاصطناعي (حتى 5 نتائج في نهاية القائمة)</h3>
         <div class="field-group">
@@ -343,7 +338,7 @@ app.get(['/manifest.json', '/:config/manifest.json'], (req, res) => {
   res.json(manifest);
 });
 
-// مسار الترجمة الفورية عبر الذكاء الاصطناعي
+// مسار الترجمة الفورية بالذكاء الاصطناعي
 app.get('/translate', async (req, res) => {
   const { subUrl, geminiKey, groqKey, deeplKey, openaiKey, format } = req.query;
   if (!subUrl) return res.status(400).send("No subtitle URL");
@@ -411,7 +406,7 @@ async function resolveAnimeMeta(rawId) {
   return null;
 }
 
-// معالج جلب الترجمات الشامل المباشر
+// معالج جلب الترجمات الشامل
 const handleSubtitles = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Content-Type', 'application/json');
@@ -465,7 +460,7 @@ const handleSubtitles = async (req, res) => {
   for (const tid of targetIds) {
     const fetchType = (tid.startsWith('kitsu') || type === 'anime') ? 'series' : type;
 
-    // 1. OpenSubtitles v3 (روابط مباشرة صافية مدعومة من المشغل)
+    // OpenSubtitles
     requests.push(
       axios.get(`https://opensubtitles-v3.strem.io/subtitles/${fetchType}/${tid}.json`, { headers: clientHeaders, timeout: 4500 })
         .then(r => r.data?.subtitles || []).catch(() => []),
@@ -473,27 +468,13 @@ const handleSubtitles = async (req, res) => {
         .then(r => r.data?.subtitles || []).catch(() => [])
     );
 
-    // 2. SubSource API
-    if (subsourceKey && tid.startsWith('tt')) {
-      requests.push(
-        axios.get(`https://api.subsource.net/api/v1/subtitles?imdb=${tid}&lang=ar,en`, {
-          headers: { 'X-API-Key': subsourceKey.trim() },
-          timeout: 4500
-        }).then(r => (r.data?.subtitles || []).map(s => ({
-          id: `subsource_${s.id}`,
-          url: s.download_url,
-          lang: s.lang === 'Arabic' || s.lang === 'ar' ? 'ara' : 'eng'
-        }))).catch(() => [])
-      );
-    }
-
-    // 3. SubDL Mirror المباشر
+    // SubDL
     requests.push(
       axios.get(`https://subdl-stremio.vercel.app/subtitles/${fetchType}/${tid}.json`, { headers: clientHeaders, timeout: 4500 })
         .then(r => r.data?.subtitles || []).catch(() => [])
     );
 
-    // 4. Subscene & YTS
+    // Subscene & YTS
     requests.push(
       axios.get(`https://subscene.strem.fun/subtitles/${fetchType}/${tid}.json`, { headers: clientHeaders, timeout: 4000 })
         .then(r => r.data?.subtitles || []).catch(() => []),
@@ -501,7 +482,7 @@ const handleSubtitles = async (req, res) => {
         .then(r => r.data?.subtitles || []).catch(() => [])
     );
 
-    // 5. مصادر الأنمي (Kitsunekko, Subanime, Anime-Subtitles)
+    // مصادر الأنمي
     if (tid.startsWith('kitsu') || tid.startsWith('anilist') || fetchType === 'series') {
       requests.push(
         axios.get(`https://anime-subtitles.strem.fun/subtitles/series/${tid}.json`, { headers: clientHeaders, timeout: 4500 })
@@ -514,7 +495,7 @@ const handleSubtitles = async (req, res) => {
     }
   }
 
-  // 6. AnimeTosho
+  // AnimeTosho
   if (animeInfo?.title) {
     const q = `${animeInfo.title} ${animeInfo.ep}`;
     requests.push(
@@ -551,16 +532,24 @@ const handleSubtitles = async (req, res) => {
 
         let l = (sub.lang || '').toLowerCase();
         if (l === 'ara' || l === 'ar' || l === 'arabic' || l.includes('ara')) {
-          arabicSubs.push({ id: `sub_ar_${arabicSubs.length + 1}`, url: sub.url, lang: 'ara' });
+          arabicSubs.push({
+            id: `sub_ar_${arabicSubs.length + 1}`,
+            url: sub.url,
+            lang: 'ara'
+          });
         } else {
-          nonArabicSubs.push({ id: `sub_other_${nonArabicSubs.length + 1}`, url: sub.url, lang: l || 'eng' });
+          nonArabicSubs.push({
+            id: `sub_en_${nonArabicSubs.length + 1}`,
+            url: sub.url,
+            lang: l || 'eng'
+          });
         }
       }
     }
 
     let combinedSubs = [...arabicSubs, ...nonArabicSubs];
 
-    // إضافة ما يصل إلى 5 ترجمات مولدة بالذكاء الاصطناعي في نهاية القائمة
+    // إضافة ترجمات الذكاء الاصطناعي (حتى 5 نتائج) في نهاية القائمة
     const hasAiKey = geminiKey || groqKey || deeplKey || openaiKey;
     if (nonArabicSubs.length > 0 && hasAiKey) {
       const candidates = nonArabicSubs.slice(0, 5);
