@@ -1,8 +1,6 @@
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
-const zlib = require('zlib');
-const AdmZip = require('adm-zip');
 
 const app = express();
 app.use(cors());
@@ -10,9 +8,9 @@ app.use(express.json());
 
 const manifest = {
   id: "org.nuvio.universal.gemini.subtitles",
-  version: "24.0.0",
+  version: "25.0.0",
   name: "Universal Subtitles & Gemini AI",
-  description: "جلب الترجمات الشاملة المباشرة مع فك الضغط التلقائي والترجمة الفورية عبر الذكاء الاصطناعي",
+  description: "جلب الترجمات الشاملة المباشرة للأفلام والمسلسلات والأنمي مع الترجمة الفورية عبر الذكاء الاصطناعي",
   resources: [
     {
       name: "subtitles",
@@ -25,54 +23,6 @@ const manifest = {
   catalogs: []
 };
 
-// مسار فك الضغط ومعالجة الترجمات الفورية
-app.get(['/sub-proxy', '/sub-proxy.srt'], async (req, res) => {
-  const { url } = req.query;
-  if (!url) return res.status(400).send("No URL provided");
-
-  try {
-    const response = await axios.get(url, {
-      responseType: 'arraybuffer',
-      timeout: 10000,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)',
-        'Accept': '*/*'
-      }
-    });
-
-    let buffer = Buffer.from(response.data);
-
-    // 1. فحص وفك ضغط ملفات ZIP تلقائياً
-    if (buffer.length > 4 && buffer[0] === 0x50 && buffer[1] === 0x4b) {
-      try {
-        const zip = new AdmZip(buffer);
-        const zipEntries = zip.getEntries();
-        const subEntry = zipEntries.find(entry => 
-          entry.entryName.endsWith('.srt') || 
-          entry.entryName.endsWith('.ass') || 
-          entry.entryName.endsWith('.vtt')
-        );
-        if (subEntry) {
-          buffer = subEntry.getData();
-        }
-      } catch (e) {}
-    }
-
-    // 2. فحص وفك ضغط ملفات Gzip تلقائياً
-    if (buffer.length > 2 && buffer[0] === 0x1f && buffer[1] === 0x8b) {
-      try {
-        buffer = zlib.gunzipSync(buffer);
-      } catch (e) {}
-    }
-
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-    return res.send(buffer.toString('utf8'));
-  } catch (err) {
-    return res.redirect(url);
-  }
-});
-
 // مسار فحص وتجربة المفاتيح
 app.post('/test-key', async (req, res) => {
   const { provider, key } = req.body;
@@ -84,9 +34,7 @@ app.post('/test-key', async (req, res) => {
     if (provider === 'gemini') {
       const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${cleanKey}`;
       const r = await axios.get(url, { timeout: 7000 });
-      if (r.status === 200 && r.data?.models) {
-        return res.json({ success: true, message: "مفتاح Gemini صالح وشغال 100% ✅" });
-      }
+      if (r.status === 200 && r.data?.models) return res.json({ success: true, message: "مفتاح Gemini صالح وشغال 100% ✅" });
     }
 
     if (provider === 'opensub') {
@@ -175,7 +123,6 @@ app.get(['/', '/configure'], (req, res) => {
         .test-msg { font-size: 11px; margin-top: 4px; display: none; }
         .btn-install { width: 100%; padding: 14px; margin-top: 20px; border-radius: 8px; border: none; background: #0284c7; color: #fff; font-weight: bold; cursor: pointer; font-size: 15px; }
         .btn-install:hover { background: #0369a1; }
-        #installStatus { display: none; margin-top: 10px; font-size: 12px; color: #fbbf24; text-align: center; font-weight: 500; }
       </style>
     </head>
     <body>
@@ -183,7 +130,7 @@ app.get(['/', '/configure'], (req, res) => {
         <h2>Universal Subtitles & Gemini AI</h2>
         
         <div class="notice-box">
-          ⏳ <b>تنبيه:</b> في حال تأخر الاستجابة، السيرفر يستغرق بضع ثوانٍ للاستيقاظ من وضع السكون.
+          ⏳ <b>تنبيه:</b> السيرفر يعمل بروابط جلب مباشرة ومطابقة للمعايير لضمان ظهور نصوص الترجمة فورياً وبدون انقطاع.
         </div>
 
         <h3>🤖 محركات الذكاء الاصطناعي (حتى 5 نتائج في نهاية القائمة)</h3>
@@ -329,7 +276,6 @@ app.get(['/', '/configure'], (req, res) => {
         </div>
 
         <button class="btn-install" onclick="install()">تثبيت / تحديث في Nuvio</button>
-        <div id="installStatus">جاري توجيه التثبيت إلى Nuvio...</div>
       </div>
 
       <script>
@@ -362,9 +308,6 @@ app.get(['/', '/configure'], (req, res) => {
         }
 
         function install() {
-          const statusEl = document.getElementById('installStatus');
-          statusEl.style.display = 'block';
-
           const geminiKey = document.getElementById('geminiKey').value.trim();
           const groqKey = document.getElementById('groqKey').value.trim();
           const deeplKey = document.getElementById('deeplKey').value.trim();
@@ -401,7 +344,7 @@ app.get(['/manifest.json', '/:config/manifest.json'], (req, res) => {
 });
 
 // مسار الترجمة الفورية عبر الذكاء الاصطناعي
-app.get(['/translate', '/translate.srt'], async (req, res) => {
+app.get('/translate', async (req, res) => {
   const { subUrl, geminiKey, groqKey, deeplKey, openaiKey, format } = req.query;
   if (!subUrl) return res.status(400).send("No subtitle URL");
 
@@ -468,7 +411,7 @@ async function resolveAnimeMeta(rawId) {
   return null;
 }
 
-// معالج جلب الترجمات الشامل
+// معالج جلب الترجمات الشامل المباشر
 const handleSubtitles = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Content-Type', 'application/json');
@@ -522,26 +465,13 @@ const handleSubtitles = async (req, res) => {
   for (const tid of targetIds) {
     const fetchType = (tid.startsWith('kitsu') || type === 'anime') ? 'series' : type;
 
-    // 1. OpenSubtitles
-    if (openSubKey && tid.startsWith('tt')) {
-      requests.push(
-        axios.get(`https://api.opensubtitles.com/api/v1/subtitles?imdb_id=${tid.replace('tt', '')}&languages=ar,en`, {
-          headers: { 'Api-Key': openSubKey.trim(), 'User-Agent': 'NuvioSubtitlesApp v1.0.0' },
-          timeout: 4500
-        }).then(r => (r.data?.data || []).map(s => ({
-          id: `opensub_${s.id}`,
-          url: s.attributes?.files?.[0]?.file_id ? `https://api.opensubtitles.com/api/v1/download/${s.attributes.files[0].file_id}` : '',
-          lang: s.attributes?.language === 'ar' ? 'ara' : 'eng'
-        }))).catch(() => [])
-      );
-    } else {
-      requests.push(
-        axios.get(`https://opensubtitles-v3.strem.io/subtitles/${fetchType}/${tid}.json`, { headers: clientHeaders, timeout: 4500 })
-          .then(r => r.data?.subtitles || []).catch(() => []),
-        axios.get(`https://opensubtitles.strem.fun/subtitles/${fetchType}/${tid}.json`, { headers: clientHeaders, timeout: 4500 })
-          .then(r => r.data?.subtitles || []).catch(() => [])
-      );
-    }
+    // 1. OpenSubtitles v3 (روابط مباشرة صافية مدعومة من المشغل)
+    requests.push(
+      axios.get(`https://opensubtitles-v3.strem.io/subtitles/${fetchType}/${tid}.json`, { headers: clientHeaders, timeout: 4500 })
+        .then(r => r.data?.subtitles || []).catch(() => []),
+      axios.get(`https://opensubtitles.strem.fun/subtitles/${fetchType}/${tid}.json`, { headers: clientHeaders, timeout: 4500 })
+        .then(r => r.data?.subtitles || []).catch(() => [])
+    );
 
     // 2. SubSource API
     if (subsourceKey && tid.startsWith('tt')) {
@@ -557,32 +487,13 @@ const handleSubtitles = async (req, res) => {
       );
     }
 
-    // 3. SubDL API & Mirrors
-    if (subdlKey && tid.startsWith('tt')) {
-      requests.push(
-        axios.get(`https://api.subdl.com/api/v1/subtitles?api_key=${subdlKey.trim()}&imdb_id=${tid}&languages=ar,en`, { timeout: 4500 })
-          .then(r => (r.data?.subtitles || []).map(s => ({
-            id: `subdl_${s.id}`,
-            url: `https://dl.subdl.com${s.url}`,
-            lang: s.language === 'Arabic' ? 'ara' : 'eng'
-          }))).catch(() => [])
-      );
-    } else {
-      requests.push(
-        axios.get(`https://subdl-stremio.vercel.app/subtitles/${fetchType}/${tid}.json`, { headers: clientHeaders, timeout: 4500 })
-          .then(r => r.data?.subtitles || []).catch(() => [])
-      );
-    }
+    // 3. SubDL Mirror المباشر
+    requests.push(
+      axios.get(`https://subdl-stremio.vercel.app/subtitles/${fetchType}/${tid}.json`, { headers: clientHeaders, timeout: 4500 })
+        .then(r => r.data?.subtitles || []).catch(() => [])
+    );
 
-    // 4. Wyzie Subs
-    if (wyzieKey && tid.startsWith('tt')) {
-      requests.push(
-        axios.get(`https://wyzie.ru/api/v1/subtitles/${fetchType}/${tid}.json?api_key=${wyzieKey.trim()}`, { timeout: 4000 })
-          .then(r => r.data?.subtitles || []).catch(() => [])
-      );
-    }
-
-    // 5. Subscene & YTS
+    // 4. Subscene & YTS
     requests.push(
       axios.get(`https://subscene.strem.fun/subtitles/${fetchType}/${tid}.json`, { headers: clientHeaders, timeout: 4000 })
         .then(r => r.data?.subtitles || []).catch(() => []),
@@ -590,7 +501,7 @@ const handleSubtitles = async (req, res) => {
         .then(r => r.data?.subtitles || []).catch(() => [])
     );
 
-    // 6. مصادر الأنمي (Kitsunekko, Subanime, Anime-Subtitles)
+    // 5. مصادر الأنمي (Kitsunekko, Subanime, Anime-Subtitles)
     if (tid.startsWith('kitsu') || tid.startsWith('anilist') || fetchType === 'series') {
       requests.push(
         axios.get(`https://anime-subtitles.strem.fun/subtitles/series/${tid}.json`, { headers: clientHeaders, timeout: 4500 })
@@ -603,7 +514,7 @@ const handleSubtitles = async (req, res) => {
     }
   }
 
-  // 7. AnimeTosho
+  // 6. AnimeTosho
   if (animeInfo?.title) {
     const q = `${animeInfo.title} ${animeInfo.ep}`;
     requests.push(
@@ -638,25 +549,23 @@ const handleSubtitles = async (req, res) => {
       if (sub && sub.url && !seenUrls.has(sub.url)) {
         seenUrls.add(sub.url);
 
-        // رابط بروكسي مباشر ينتهي بـ .srt ليتعرف عليه مشغل الفيديو فوراً
-        const cleanProxyUrl = `${protocol}://${host}/sub-proxy.srt?url=${encodeURIComponent(sub.url)}`;
-
         let l = (sub.lang || '').toLowerCase();
         if (l === 'ara' || l === 'ar' || l === 'arabic' || l.includes('ara')) {
-          arabicSubs.push({ id: `sub_ar_${arabicSubs.length + 1}`, url: cleanProxyUrl, lang: 'ara' });
+          arabicSubs.push({ id: `sub_ar_${arabicSubs.length + 1}`, url: sub.url, lang: 'ara' });
         } else {
-          nonArabicSubs.push({ id: `sub_other_${nonArabicSubs.length + 1}`, url: sub.url, cleanUrl: cleanProxyUrl, lang: l || 'eng' });
+          nonArabicSubs.push({ id: `sub_other_${nonArabicSubs.length + 1}`, url: sub.url, lang: l || 'eng' });
         }
       }
     }
 
-    let combinedSubs = [...arabicSubs, ...nonArabicSubs.map(s => ({ id: s.id, url: s.cleanUrl, lang: s.lang }))];
+    let combinedSubs = [...arabicSubs, ...nonArabicSubs];
 
+    // إضافة ما يصل إلى 5 ترجمات مولدة بالذكاء الاصطناعي في نهاية القائمة
     const hasAiKey = geminiKey || groqKey || deeplKey || openaiKey;
     if (nonArabicSubs.length > 0 && hasAiKey) {
       const candidates = nonArabicSubs.slice(0, 5);
       candidates.forEach((cand, idx) => {
-        const aiProxyUrl = `${protocol}://${host}/translate.srt?subUrl=${encodeURIComponent(cand.url)}&geminiKey=${geminiKey}&groqKey=${groqKey}&deeplKey=${deeplKey}&openaiKey=${openaiKey}&format=${prefFormat}`;
+        const aiProxyUrl = `${protocol}://${host}/translate?subUrl=${encodeURIComponent(cand.url)}&geminiKey=${geminiKey}&groqKey=${groqKey}&deeplKey=${deeplKey}&openaiKey=${openaiKey}&format=${prefFormat}`;
 
         combinedSubs.push({
           id: `ai_sub_${idx + 1}`,
