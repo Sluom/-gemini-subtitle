@@ -10,7 +10,7 @@ app.use(express.json());
 
 const manifest = {
   id: "org.nuvio.universal.gemini.subtitles",
-  version: "26.1.0",
+  version: "26.2.0",
   name: "Universal Subtitles & Gemini AI",
   description: "جلب الترجمات الشاملة المباشرة للأفلام والمسلسلات والأنمي مع الترجمة الفورية عبر الذكاء الاصطناعي",
   resources: [
@@ -25,7 +25,7 @@ const manifest = {
   catalogs: []
 };
 
-// ============= أدوات مساعدة =============
+// ============= أدوات مساعدة عامة =============
 
 // base64url آمن للاستخدام داخل مسارات URL (بدون / أو + أو =)
 function base64UrlDecode(str) {
@@ -56,6 +56,48 @@ function isAssUrl(url) {
   if (!url) return false;
   return /\.(ass|ssa)(\?|$)/i.test(url);
 }
+
+// فك تشفير إعدادات المستخدم (المفاتيح) من التوكن الموجود في الرابط - دالة موحّدة
+// تُستخدم في أكثر من مسار (subtitles و translate) لتفادي تكرار نفس منطق فك التشفير
+function decodeConfig(token) {
+  const keys = {
+    geminiKey: '', groqKey: '', deeplKey: '', openaiKey: '',
+    subsourceKey: '', openSubKey: '', subdlKey: '', wyzieKey: '', tmdbKey: ''
+  };
+  if (!token) return keys;
+  try {
+    const p = JSON.parse(base64UrlDecode(token));
+    Object.keys(keys).forEach(k => { if (p[k]) keys[k] = p[k]; });
+  } catch (e) {
+    logErr('config:decode', e);
+  }
+  return keys;
+}
+
+// قائمة نماذج Gemini التي نجربها بالترتيب - مستخدمة في أكثر من مكان لذا وُحّدت هنا
+const GEMINI_MODELS = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-pro'];
+
+const MIRROR_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)',
+  'Accept': 'application/json'
+};
+
+// أسماء عرض مقروءة لكل مصدر ترجمة (تُستخدم إجباريًا ضمن اسم الترجمة النهائي)
+const SOURCE_LABELS = {
+  'opensub-v3': 'OpenSubtitles',
+  'opensub-fun': 'OpenSubtitles',
+  'opensub-official': 'OpenSubtitles',
+  'subdl-mirror': 'SubDL',
+  'subdl-official': 'SubDL',
+  'subscene': 'Subscene',
+  'yify': 'YIFY Subtitles',
+  'anime-subs': 'Anime Subtitles',
+  'kitsunekko': 'Kitsunekko',
+  'subanime': 'SubAnime',
+  'animetosho': 'AnimeTosho',
+  'wyzie': 'Wyzie Subs'
+};
+function sourceLabelOf(key) { return SOURCE_LABELS[key] || 'مصدر غير معروف'; }
 
 // ============= تحليل/بناء ملفات الترجمة (srt <-> ass) =============
 // الهدف: استخراج التوقيت والنص بأنفسنا بالكود (بدون الاعتماد على الذكاء الاصطناعي
@@ -152,8 +194,7 @@ async function translateChunkJSON(texts, provider, key) {
 
   try {
     if (provider === 'gemini') {
-      const modelsToTry = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-pro'];
-      for (const m of modelsToTry) {
+      for (const m of GEMINI_MODELS) {
         try {
           const url = `https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${encodeURIComponent(key.trim())}`;
           const r = await axios.post(url, {
@@ -473,8 +514,10 @@ app.get(['/', '/configure'], (req, res) => {
 
         <h3>⚙️ إعدادات العرض</h3>
         <div class="hint">
-          يتم جلب كل الترجمات المتوفرة بدون حد أقصى، مع تفضيل ملفات ASS دائمًا.
-          ترجمات الذكاء الاصطناعي (حتى 10، من لغات متعددة إلى العربية، بصيغة ASS عند توفر مصدر ASS) تُضاف دومًا في آخر القائمة.
+          يتم جلب كل الترجمات المتوفرة بدون حد أقصى، مع استبعاد الملفات الفارغة تلقائيًا،
+          وتفضيل ملفات ASS/SSA دائمًا. كل ترجمة تظهر باسمها الأصلي + اسم المصدر + صيغة الملف،
+          وباقات الموسم الكاملة (إن وُجدت) تُضاف وتُميَّز بعلامة [باقة الموسم].
+          ترجمات الذكاء الاصطناعي (حتى 10، من لغات متعددة إلى العربية، دائمًا بصيغة ASS) تُضاف دومًا في آخر القائمة.
         </div>
 
         <button class="btn-install" onclick="install()">تثبيت / تحديث في Nuvio</button>
@@ -550,16 +593,27 @@ app.get(['/manifest.json', '/:config/manifest.json'], (req, res) => {
 });
 
 // مسار الترجمة الفورية بالذكاء الاصطناعي
-// يقبل أيضًا /translate/trans.ass (اسم الرابط يحتوي "trans" لتمييزه بصريًا في القائمة)
+// يقبل أيضًا التوكن /:config/translate/... حتى لا نُضطر لتكرار كل المفاتيح الأربعة
+// داخل رابط كل ترجمة على حدة (كانت مكررة سابقًا حتى 10 مرات لكل استجابة واحدة).
+// يبقى قبول geminiKey/groqKey/... كـ query params (بدون config) للتوافق مع أي روابط قديمة.
 // المنهجية: نحلل توقيت/نص الملف الأصلي بأنفسنا بالكود (srt أو ass)، نرسل فقط النصوص
 // المنطوقة للترجمة (بدون توقيت)، ثم نبني ملف ass صحيح بنفس التوقيت الأصلي بالضبط.
 // هذا تفضيل لصيغة ass وليس إلزاميًا: إذا تعذّر التحليل البنيوي لأي سبب، نلجأ لترجمة
 // النص كاملًا كخطة احتياطية بدل فشل الطلب.
-app.get(['/translate', '/translate/:label'], async (req, res) => {
-  const { subUrl, geminiKey, groqKey, deeplKey, openaiKey } = req.query;
+app.get(['/translate', '/translate/:label', '/:config/translate', '/:config/translate/:label'], async (req, res) => {
+  const { subUrl } = req.query;
   if (!subUrl) return res.status(400).send("No subtitle URL");
 
-  const keys = { geminiKey, groqKey, deeplKey, openaiKey };
+  const keys = req.params.config
+    ? decodeConfig(req.params.config)
+    : {
+        geminiKey: req.query.geminiKey || '',
+        groqKey: req.query.groqKey || '',
+        deeplKey: req.query.deeplKey || '',
+        openaiKey: req.query.openaiKey || ''
+      };
+  const { geminiKey, groqKey, deeplKey, openaiKey } = keys;
+
   const reqId = Math.random().toString(36).slice(2, 8);
   const t0 = Date.now();
   const elapsed = () => `${((Date.now() - t0) / 1000).toFixed(1)}s`;
@@ -631,8 +685,7 @@ app.get(['/translate', '/translate/:label'], async (req, res) => {
     if (translatedText) break;
     try {
       if (provider === 'gemini') {
-        const modelsToTry = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-pro'];
-        for (const m of modelsToTry) {
+        for (const m of GEMINI_MODELS) {
           try {
             const url = `https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${encodeURIComponent(geminiKey.trim())}`;
             const gRes = await axios.post(url, { contents: [{ parts: [{ text: wholeTextPrompt }] }] }, { headers: { 'Content-Type': 'application/json' }, timeout: 25000 });
@@ -733,8 +786,6 @@ async function tvdbToTmdb(tvdbId, tmdbKey) {
 
 // نقطة الدخول العامة لأي معرف (tt/kitsu/mal/anilist/tmdb/tvdb)
 // تُرجع: { imdbId, season, episode, kitsuId, absoluteEp, title }
-// imdbId يُستخدم للمصادر المبنية على IMDB (OpenSubtitles/SubDL/الأغلبية)
-// kitsuId + absoluteEp يُستخدمان لمصادر الأنمي المتخصصة (التي تفهرس بالترقيم المطلق)
 async function resolveExternalId(rawId, tmdbKey) {
   try {
     const parts = rawId.split(':');
@@ -787,7 +838,6 @@ async function resolveExternalId(rawId, tmdbKey) {
 
       // ابحث في قاعدة بيانات الأنمي أولاً لمعرفة إن كان العمل أنمي، ولإيجاد معرف kitsu المطابق
       const map = await getAnimeListMap();
-      const idField = prefix === 'tmdb' ? null : 'tvdb_id';
       let entry = null;
 
       if (prefix === 'tvdb') {
@@ -836,7 +886,8 @@ async function resolveExternalId(rawId, tmdbKey) {
 }
 
 // جلب مباشر من OpenSubtitles.com الرسمي باستخدام مفتاح API الخاص بالمستخدم
-async function fetchOpenSubtitlesDirect(imdbId, season, episode, apiKey) {
+// seasonPack=true عند استدعائها بدون رقم حلقة لجلب ملفات باقة الموسم إن كانت متاحة
+async function fetchOpenSubtitlesDirect(imdbId, season, episode, apiKey, seasonPack = false) {
   if (!apiKey) return [];
   try {
     const cleanId = imdbId.replace('tt', '');
@@ -857,16 +908,22 @@ async function fetchOpenSubtitlesDirect(imdbId, season, episode, apiKey) {
     const out = [];
     for (const item of items) {
       const attrs = item.attributes;
-      const fileUrl = attrs?.files?.[0]?.file_id;
-      if (!fileUrl) continue;
+      const fileId = attrs?.files?.[0]?.file_id;
+      if (!fileId) continue;
       // نحتاج رابط تحميل فعلي عبر endpoint التحميل
       try {
         const dl = await axios.post('https://api.opensubtitles.com/api/v1/download',
-          { file_id: fileUrl },
+          { file_id: fileId },
           { headers: { 'Api-Key': apiKey.trim(), 'Content-Type': 'application/json', 'User-Agent': 'NuvioSubtitlesApp v1.0.0' }, timeout: 8000 }
         );
         if (dl.data?.link) {
-          out.push({ url: dl.data.link, lang: attrs.language || 'en' });
+          out.push({
+            url: dl.data.link,
+            lang: attrs.language || 'en',
+            origName: attrs.release || attrs.files?.[0]?.file_name || null,
+            _source: 'opensub-official',
+            _seasonPack: seasonPack
+          });
         }
       } catch (e) {
         logErr('opensubtitles:download', e);
@@ -879,8 +936,8 @@ async function fetchOpenSubtitlesDirect(imdbId, season, episode, apiKey) {
   }
 }
 
-// جلب مباشر من SubDL باستخدام مفتاح API الخاص بالمستخدم + فك ضغط ملف zip
-async function fetchSubDLDirect(imdbId, season, episode, apiKey) {
+// جلب مباشر من SubDL باستخدام مفتاح API الخاص بالمستخدم (الملفات تصل داخل zip يُفك لاحقًا)
+async function fetchSubDLDirect(imdbId, season, episode, apiKey, seasonPack = false) {
   if (!apiKey) return [];
   try {
     const params = new URLSearchParams({ api_key: apiKey.trim(), imdb_id: imdbId, languages: 'AR,EN' });
@@ -894,13 +951,179 @@ async function fetchSubDLDirect(imdbId, season, episode, apiKey) {
     for (const item of items) {
       if (!item.url) continue;
       const zipUrl = item.url.startsWith('http') ? item.url : `https://dl.subdl.com${item.url}`;
-      out.push({ zipUrl, lang: (item.lang || 'en').toLowerCase() });
+      out.push({
+        zipUrl,
+        lang: (item.lang || 'en').toLowerCase(),
+        origName: item.release_name || item.name || null,
+        _source: 'subdl-official',
+        _seasonPack: seasonPack || !!item.full_season
+      });
     }
     return out;
   } catch (e) {
     logErr('subdl:direct', e);
     return [];
   }
+}
+
+// جلب مباشر من Wyzie Subs (توثيق مؤكد: https://docs.wyzie.io/subs/usage/direct)
+// id يقبل معرف IMDB (tt...) مباشرة. الاستجابة مصفوفة كائنات فيها url جاهز للاستخدام مباشرة.
+async function fetchWyzieDirect(imdbId, season, episode, apiKey, seasonPack = false) {
+  if (!apiKey) return [];
+  try {
+    const params = new URLSearchParams({ id: imdbId, key: apiKey.trim(), language: 'ar,en' });
+    if (season) params.set('season', season);
+    if (episode) params.set('episode', episode);
+
+    const r = await axios.get(`https://sub.wyzie.io/search?${params.toString()}`, { timeout: 8000 });
+    const items = Array.isArray(r.data) ? r.data : [];
+    return items
+      .filter(it => it.url)
+      .map(it => ({
+        url: it.url,
+        lang: (it.language || 'en').toLowerCase(),
+        origName: it.release || it.fileName || null,
+        _source: 'wyzie',
+        _seasonPack: seasonPack
+      }));
+  } catch (e) {
+    logErr('wyzie:direct', e);
+    return [];
+  }
+}
+
+// ============= جلب من المرايا المجتمعية (Stremio-style) =============
+// دالة موحّدة لكل الطلبات المتشابهة الشكل بدل تكرار نفس كتلة axios عدة مرات
+// (وتُستخدم أيضًا لجلب باقة الموسم عبر seasonPack=true دون تكرار الكود)
+function mirrorRequest(url, sourceKey, seasonPack) {
+  return axios.get(url, { headers: MIRROR_HEADERS, timeout: 6000 })
+    .then(r => (r.data?.subtitles || []).map(s => ({
+      url: s.url,
+      lang: s.lang,
+      origName: s.title || s.SubFileName || s.release || s.name || null,
+      _source: sourceKey,
+      _seasonPack: !!seasonPack
+    })))
+    .catch(e => { logErr(`mirror:${sourceKey}`, e); return []; });
+}
+
+function buildMirrorRequests(tid, fetchType, seasonPack = false) {
+  const reqs = [
+    mirrorRequest(`https://opensubtitles-v3.strem.io/subtitles/${fetchType}/${tid}.json`, 'opensub-v3', seasonPack),
+    mirrorRequest(`https://opensubtitles.strem.fun/subtitles/${fetchType}/${tid}.json`, 'opensub-fun', seasonPack),
+    mirrorRequest(`https://subdl-stremio.vercel.app/subtitles/${fetchType}/${tid}.json`, 'subdl-mirror', seasonPack),
+    mirrorRequest(`https://subscene.strem.fun/subtitles/${fetchType}/${tid}.json`, 'subscene', seasonPack),
+    mirrorRequest(`https://yifysubtitles.strem.fun/subtitles/${fetchType}/${tid}.json`, 'yify', seasonPack)
+  ];
+  if (tid.startsWith('kitsu') || tid.startsWith('anilist') || tid.startsWith('mal') || fetchType === 'series') {
+    reqs.push(
+      mirrorRequest(`https://anime-subtitles.strem.fun/subtitles/series/${tid}.json`, 'anime-subs', seasonPack),
+      mirrorRequest(`https://kitsunekko-subtitles.strem.fun/subtitles/series/${tid}.json`, 'kitsunekko', seasonPack),
+      mirrorRequest(`https://subanime.strem.fun/subtitles/series/${tid}.json`, 'subanime', seasonPack)
+    );
+  }
+  return reqs;
+}
+
+// ============= التحقق من صحة/امتلاء ملفات الترجمة قبل عرضها =============
+
+// يفحص رابط ترجمة مباشر: يجلب بداية الملف فقط، يتأكد أنه غير فارغ، ويكتشف الصيغة الفعلية
+async function inspectSubtitleUrl(url) {
+  try {
+    const r = await axios.get(url, {
+      responseType: 'text',
+      timeout: 7000,
+      headers: { Range: 'bytes=0-6000' },
+      maxContentLength: 2 * 1024 * 1024,
+      maxBodyLength: 2 * 1024 * 1024,
+      validateStatus: s => s < 500
+    });
+    const text = String(r.data || '');
+    if (!text.trim()) return null; // ملف فارغ فعليًا - يُستبعد
+
+    const trimmedLower = text.trim().toLowerCase();
+    if (trimmedLower.startsWith('webvtt')) return { ext: 'vtt' };
+    if (/\[script info\]/i.test(text)) {
+      // نبقيها ass/ssa حتى لو كان محتوى الرأس فيه أخطاء - المطلوب عدم استبعادها بسبب ذلك
+      return { ext: /ScriptType:\s*v4\.00\+/i.test(text) ? 'ass' : 'ssa' };
+    }
+    if (/\d{2}:\d{2}:\d{2}[,.]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[,.]\d{3}/.test(text)) {
+      return { ext: 'srt' };
+    }
+    // محتوى غير فارغ لكن الصيغة غير واضحة - نبقيه كـ srt افتراضيًا بدل استبعاده
+    return { ext: 'srt' };
+  } catch (e) {
+    return null;
+  }
+}
+
+// نفس فكرة الفحص أعلاه، لكن لأرشيفات SubDL (zip) عبر فك الضغط الفعلي
+function extractFirstSubtitleFromZip(buffer) {
+  const zip = new AdmZip(buffer);
+  const entries = zip.getEntries().filter(e => /\.(srt|ass|ssa|vtt)$/i.test(e.entryName));
+  if (!entries.length) return null;
+  const chosen = entries.find(e => /\.ass$/i.test(e.entryName))
+    || entries.find(e => /\.ssa$/i.test(e.entryName))
+    || entries.find(e => /\.srt$/i.test(e.entryName))
+    || entries[0];
+  const content = chosen.getData().toString('utf8');
+  const ext = chosen.entryName.split('.').pop().toLowerCase();
+  return { content, ext };
+}
+
+async function inspectZipUrl(zipUrl) {
+  try {
+    const zipRes = await axios.get(zipUrl, { responseType: 'arraybuffer', timeout: 10000, maxContentLength: 15 * 1024 * 1024 });
+    const extracted = extractFirstSubtitleFromZip(Buffer.from(zipRes.data));
+    if (!extracted || !extracted.content.trim()) return null; // أرشيف بدون ترجمة فعلية أو فارغ - يُستبعد
+    return { ext: extracted.ext };
+  } catch (e) {
+    logErr('inspectZipUrl', e);
+    return null;
+  }
+}
+
+// يزيل التكرار عن قائمة روابط ثم يتحقق من كل رابط بالتوازي، ويستبعد أي رابط فارغ/فاشل
+async function validateAndTag(rawList) {
+  const seen = new Set();
+  const unique = [];
+  for (const s of rawList) {
+    if (!s || !s.url || seen.has(s.url)) continue;
+    seen.add(s.url);
+    unique.push(s);
+  }
+  const inspected = await Promise.all(unique.map(async s => {
+    const urlExtMatch = s.url.match(/\.(srt|ass|ssa|vtt)(\?|$)/i);
+    const info = await inspectSubtitleUrl(s.url);
+    if (!info) return null;
+    const ext = urlExtMatch ? urlExtMatch[1].toLowerCase() : info.ext;
+    return { ...s, _ext: ext };
+  }));
+  return inspected.filter(Boolean);
+}
+
+async function validateZipEntries(zipList) {
+  const seen = new Set();
+  const unique = [];
+  for (const z of zipList) {
+    if (!z || !z.zipUrl || seen.has(z.zipUrl)) continue;
+    seen.add(z.zipUrl);
+    unique.push(z);
+  }
+  const inspected = await Promise.all(unique.map(async z => {
+    const info = await inspectZipUrl(z.zipUrl);
+    if (!info) return null;
+    return { ...z, _ext: info.ext };
+  }));
+  return inspected.filter(Boolean);
+}
+
+// يبني الاسم النهائي: الاسم الأصلي (كما هو) + اسم المصدر (إجباري) + صيغة الملف (إجبارية)
+// + علامة باقة الموسم إن وُجدت
+function buildName(sub) {
+  const base = sub.origName ? sub.origName : (sub.lang ? String(sub.lang).toUpperCase() : 'ترجمة');
+  const packTag = sub._seasonPack ? ' [باقة الموسم]' : '';
+  return `${base} • ${sourceLabelOf(sub._source)} • ${String(sub._ext).toUpperCase()}${packTag}`;
 }
 
 // معالج جلب الترجمات الشامل
@@ -918,30 +1141,7 @@ const handleSubtitles = async (req, res) => {
 
   if (!targetId) return res.json({ subtitles: [] });
 
-  let geminiKey = '', groqKey = '', deeplKey = '', openaiKey = '';
-  let subsourceKey = '', openSubKey = '', subdlKey = '', wyzieKey = '', tmdbKey = '';
-
-  if (req.params.config) {
-    try {
-      const p = JSON.parse(base64UrlDecode(req.params.config));
-      if (p.geminiKey) geminiKey = p.geminiKey;
-      if (p.groqKey) groqKey = p.groqKey;
-      if (p.deeplKey) deeplKey = p.deeplKey;
-      if (p.openaiKey) openaiKey = p.openaiKey;
-      if (p.subsourceKey) subsourceKey = p.subsourceKey;
-      if (p.openSubKey) openSubKey = p.openSubKey;
-      if (p.subdlKey) subdlKey = p.subdlKey;
-      if (p.wyzieKey) wyzieKey = p.wyzieKey;
-      if (p.tmdbKey) tmdbKey = p.tmdbKey;
-    } catch (e) {
-      logErr('config:decode', e);
-    }
-  }
-
-  const clientHeaders = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)',
-    'Accept': 'application/json'
-  };
+  const { geminiKey, groqKey, deeplKey, openaiKey, openSubKey, subdlKey, wyzieKey, tmdbKey } = decodeConfig(req.params.config);
 
   const targetIds = [targetId];
   let animeInfo = null;
@@ -958,7 +1158,6 @@ const handleSubtitles = async (req, res) => {
     }
 
     // 2) أضف المعرف المكافئ بصيغة kitsu + رقم حلقة مطلق - يخدم مصادر الأنمي المتخصصة
-    //    (تُفهرس عادة بالترقيم المطلق بغض النظر عن الموسم الرسمي على TVDB)
     if (animeInfo?.kitsuId && animeInfo?.absoluteEp && idPrefix !== 'kitsu') {
       const kitsuEquivalent = `kitsu:${animeInfo.kitsuId}:${animeInfo.absoluteEp}`;
       if (!targetIds.includes(kitsuEquivalent)) targetIds.push(kitsuEquivalent);
@@ -967,53 +1166,38 @@ const handleSubtitles = async (req, res) => {
 
   console.log(`[targetIds] ${targetId} -> [${targetIds.join(', ')}]`);
 
-
   const requests = [];
 
   for (const tid of targetIds) {
     const fetchType = (tid.startsWith('kitsu') || type === 'anime') ? 'series' : type;
+    requests.push(...buildMirrorRequests(tid, fetchType, false));
 
-    // OpenSubtitles (مرايا مجتمعية مجانية)
-    requests.push(
-      axios.get(`https://opensubtitles-v3.strem.io/subtitles/${fetchType}/${tid}.json`, { headers: clientHeaders, timeout: 6000 })
-        .then(r => r.data?.subtitles || []).catch(e => { logErr('mirror:opensub-v3', e); return []; }),
-      axios.get(`https://opensubtitles.strem.fun/subtitles/${fetchType}/${tid}.json`, { headers: clientHeaders, timeout: 6000 })
-        .then(r => r.data?.subtitles || []).catch(e => { logErr('mirror:opensub-fun', e); return []; })
-    );
-
-    // SubDL (مرآة مجتمعية)
-    requests.push(
-      axios.get(`https://subdl-stremio.vercel.app/subtitles/${fetchType}/${tid}.json`, { headers: clientHeaders, timeout: 6000 })
-        .then(r => r.data?.subtitles || []).catch(e => { logErr('mirror:subdl', e); return []; })
-    );
-
-    // Subscene & YTS
-    requests.push(
-      axios.get(`https://subscene.strem.fun/subtitles/${fetchType}/${tid}.json`, { headers: clientHeaders, timeout: 6000 })
-        .then(r => r.data?.subtitles || []).catch(e => { logErr('mirror:subscene', e); return []; }),
-      axios.get(`https://yifysubtitles.strem.fun/subtitles/${fetchType}/${tid}.json`, { headers: clientHeaders, timeout: 6000 })
-        .then(r => r.data?.subtitles || []).catch(e => { logErr('mirror:yify', e); return []; })
-    );
-
-    // مصادر الأنمي
-    if (tid.startsWith('kitsu') || tid.startsWith('anilist') || tid.startsWith('mal') || fetchType === 'series') {
-      requests.push(
-        axios.get(`https://anime-subtitles.strem.fun/subtitles/series/${tid}.json`, { headers: clientHeaders, timeout: 6000 })
-          .then(r => r.data?.subtitles || []).catch(e => { logErr('mirror:anime-subs', e); return []; }),
-        axios.get(`https://kitsunekko-subtitles.strem.fun/subtitles/series/${tid}.json`, { headers: clientHeaders, timeout: 6000 })
-          .then(r => r.data?.subtitles || []).catch(e => { logErr('mirror:kitsunekko', e); return []; }),
-        axios.get(`https://subanime.strem.fun/subtitles/series/${tid}.json`, { headers: clientHeaders, timeout: 6000 })
-          .then(r => r.data?.subtitles || []).catch(e => { logErr('mirror:subanime', e); return []; })
-      );
-    }
-
-    // OpenSubtitles الرسمي (باستخدام مفتاح المستخدم إن وُجد)
     if (openSubKey && tid.startsWith('tt')) {
       const { imdbId, season, episode } = parseImdbId(tid);
-      requests.push(
-        fetchOpenSubtitlesDirect(imdbId, season, episode, openSubKey)
-          .then(list => list.map(x => ({ url: x.url, lang: x.lang })))
-      );
+      requests.push(fetchOpenSubtitlesDirect(imdbId, season, episode, openSubKey, false));
+    }
+    if (wyzieKey && tid.startsWith('tt')) {
+      const { imdbId, season, episode } = parseImdbId(tid);
+      requests.push(fetchWyzieDirect(imdbId, season, episode, wyzieKey, false));
+    }
+  }
+
+  // باقة الموسم: نكرر الاستعلام لكل معرف tt يملك رقم موسم، لكن بدون رقم الحلقة -
+  // بعض المصادر تُرجع في هذه الحالة ملف/ملفات الموسم الكامل إن كانت متوفرة
+  const seasonPackIds = [...new Set(targetIds
+    .filter(t => t.startsWith('tt'))
+    .map(t => { const { imdbId, season } = parseImdbId(t); return season ? `${imdbId}:${season}` : null; })
+    .filter(Boolean))];
+
+  for (const spid of seasonPackIds) {
+    requests.push(...buildMirrorRequests(spid, 'series', true));
+    if (openSubKey) {
+      const { imdbId, season } = parseImdbId(spid);
+      requests.push(fetchOpenSubtitlesDirect(imdbId, season, null, openSubKey, true));
+    }
+    if (wyzieKey) {
+      const { imdbId, season } = parseImdbId(spid);
+      requests.push(fetchWyzieDirect(imdbId, season, null, wyzieKey, true));
     }
   }
 
@@ -1022,25 +1206,31 @@ const handleSubtitles = async (req, res) => {
     const q = `${animeInfo.title} ${animeInfo.absoluteEp || ''}`.trim();
     requests.push(
       axios.get(`https://animetosho.org/api/v1/search?q=${encodeURIComponent(q)}`, { timeout: 6000 })
-        .then(r => {
-          const files = [];
-          (r.data?.results || []).forEach((item, idx) => {
-            if (item.attachment_url) {
-              files.push({ id: `tosho_${idx}`, url: item.attachment_url, lang: 'eng' });
-            }
-          });
-          return files;
-        }).catch(e => { logErr('animetosho', e); return []; })
+        .then(r => (r.data?.results || [])
+          .filter(item => item.attachment_url)
+          .map(item => ({
+            url: item.attachment_url,
+            lang: 'eng',
+            origName: item.title || null,
+            _source: 'animetosho',
+            _seasonPack: false
+          })))
+        .catch(e => { logErr('animetosho', e); return []; })
     );
   }
 
-  // SubDL الرسمي (zip يحتاج فك ضغط)
+  // SubDL الرسمي (zip يحتاج فك ضغط) - حلقة محددة + باقة الموسم إن توفر مفتاح SubDL
   let subdlZipEntries = [];
   if (subdlKey) {
-    for (const tid of targetIds) {
-      if (!tid.startsWith('tt')) continue;
+    const subdlIds = new Set(targetIds.filter(t => t.startsWith('tt')));
+    for (const tid of subdlIds) {
       const { imdbId, season, episode } = parseImdbId(tid);
-      const zips = await fetchSubDLDirect(imdbId, season, episode, subdlKey);
+      const zips = await fetchSubDLDirect(imdbId, season, episode, subdlKey, false);
+      subdlZipEntries.push(...zips);
+    }
+    for (const spid of seasonPackIds) {
+      const { imdbId, season } = parseImdbId(spid);
+      const zips = await fetchSubDLDirect(imdbId, season, null, subdlKey, true);
       subdlZipEntries.push(...zips);
     }
   }
@@ -1048,98 +1238,94 @@ const handleSubtitles = async (req, res) => {
   try {
     const results = await Promise.all(requests);
     let rawSubtitles = [];
-    results.forEach(list => {
-      if (Array.isArray(list)) rawSubtitles.push(...list);
-    });
+    results.forEach(list => { if (Array.isArray(list)) rawSubtitles.push(...list); });
+
+    // التحقق من كل الروابط: استبعاد الفارغة، وتحديد الصيغة الفعلية لكل ملف
+    rawSubtitles = await validateAndTag(rawSubtitles);
+    subdlZipEntries = await validateZipEntries(subdlZipEntries);
 
     const host = req.get('host');
     const protocol = req.protocol;
 
     const arabicSubs = [];
     const nonArabicSubs = [];
-    const seenUrls = new Set();
 
     for (const sub of rawSubtitles) {
-      if (sub && sub.url && !seenUrls.has(sub.url)) {
-        seenUrls.add(sub.url);
-
-        let l = (sub.lang || '').toLowerCase();
-        if (l === 'ara' || l === 'ar' || l === 'arabic' || l.includes('ara')) {
-          arabicSubs.push({
-            id: `sub_ar_${arabicSubs.length + 1}`,
-            url: sub.url,
-            lang: 'ara'
-          });
-        } else {
-          nonArabicSubs.push({
-            id: `sub_en_${nonArabicSubs.length + 1}`,
-            url: sub.url,
-            lang: l || 'eng'
-          });
-        }
-      }
+      const l = (sub.lang || '').toLowerCase();
+      const isArabic = l === 'ara' || l === 'ar' || l === 'arabic' || l.includes('ara');
+      const bucket = isArabic ? arabicSubs : nonArabicSubs;
+      bucket.push({
+        id: `sub_${isArabic ? 'ar' : 'en'}_${bucket.length + 1}`,
+        url: sub.url,
+        lang: isArabic ? 'ara' : (l || 'eng'),
+        name: buildName(sub),
+        title: buildName(sub),
+        _ext: sub._ext,
+        _source: sub._source,
+        _lang: l,
+        _seasonPack: sub._seasonPack,
+        origName: sub.origName
+      });
     }
 
-    // إضافة روابط SubDL (تمر عبر مسار فك الضغط /subdl-extract)
     for (const entry of subdlZipEntries) {
-      if (seenUrls.has(entry.zipUrl)) continue;
-      seenUrls.add(entry.zipUrl);
       const extractUrl = `${protocol}://${host}/subdl-extract?zipUrl=${encodeURIComponent(entry.zipUrl)}`;
-      const bucket = entry.lang.startsWith('ar') ? arabicSubs : nonArabicSubs;
+      const isArabic = entry.lang.startsWith('ar');
+      const bucket = isArabic ? arabicSubs : nonArabicSubs;
+      const named = buildName({ ...entry, url: extractUrl });
       bucket.push({
         id: `sub_subdl_${bucket.length + 1}`,
         url: extractUrl,
-        lang: entry.lang.startsWith('ar') ? 'ara' : entry.lang
+        lang: isArabic ? 'ara' : entry.lang,
+        name: named,
+        title: named,
+        _ext: entry._ext,
+        _source: entry._source,
+        _lang: entry.lang,
+        _seasonPack: entry._seasonPack,
+        origName: entry.origName
       });
     }
 
     console.log(`[subtitles] ${type}/${targetId} -> عربي: ${arabicSubs.length}, أجنبي: ${nonArabicSubs.length}`);
 
-    // ترتيب كل قائمة: تفضيل ملفات ASS أولًا (بدون أي حذف - الكل يبقى، فقط إعادة ترتيب)
-    const assFirst = (a, b) => (isAssUrl(b.url) ? 1 : 0) - (isAssUrl(a.url) ? 1 : 0);
+    // تفضيل صيغة ASS/SSA دائمًا (حتى لو كانت تحتوي أخطاء بسيطة في محتواها)، ثم VTT ثم SRT
+    const formatRank = { ass: 0, ssa: 0, vtt: 1, srt: 2 };
+    const assFirst = (a, b) => (formatRank[a._ext] ?? 3) - (formatRank[b._ext] ?? 3);
     arabicSubs.sort(assFirst);
     nonArabicSubs.sort(assFirst);
 
-    // إضافة ترجمات الذكاء الاصطناعي (حتى 10 نتائج) - تُبنى بشكل منفصل لضمان عدم حذفها
-    // نختار المرشحين من لغات مختلفة قدر الإمكان (لا نكرر نفس اللغة إن وُجد بديل)،
-    // مع تفضيل مصادر ASS أولًا، ونحافظ على نفس صيغة المصدر (ASS تبقى ASS) عند الترجمة.
+    // إضافة ترجمات الذكاء الاصطناعي (حتى 10 نتائج) - المرشحون هنا تم التحقق مسبقًا من
+    // أنهم غير فارغين، لذا لا نحتاج فحصًا إضافيًا لاستبعاد ترجمات AI فارغة المصدر
     const AI_MAX = 10;
     const hasAiKey = geminiKey || groqKey || deeplKey || openaiKey;
     const aiSubs = [];
     if (nonArabicSubs.length > 0 && hasAiKey) {
-      // نرتب المرشحين: ASS أولاً، ثم حسب الترتيب الأصلي، مع تنويع اللغات
-      const sortedCandidates = [...nonArabicSubs].sort(assFirst);
       const usedLangs = new Set();
       const primary = [];
       const rest = [];
-      for (const cand of sortedCandidates) {
-        if (!usedLangs.has(cand.lang)) {
-          usedLangs.add(cand.lang);
-          primary.push(cand);
-        } else {
-          rest.push(cand);
-        }
+      for (const cand of nonArabicSubs) {
+        if (!usedLangs.has(cand._lang)) { usedLangs.add(cand._lang); primary.push(cand); }
+        else rest.push(cand);
       }
       const candidates = [...primary, ...rest].slice(0, AI_MAX);
+      const configToken = req.params.config || '';
+      const base = configToken ? `${protocol}://${host}/${configToken}` : `${protocol}://${host}`;
 
       candidates.forEach((cand, idx) => {
+        const aiProxyUrl = `${base}/translate/trans.ass?subUrl=${encodeURIComponent(cand.url)}`;
+        const origBase = cand.origName ? cand.origName : (cand._lang ? cand._lang.toUpperCase() : 'ترجمة');
+        const packTag = cand._seasonPack ? ' [باقة الموسم]' : '';
         // الناتج دائمًا بصيغة ass (نبنيها بأنفسنا بالكود من التوقيت الأصلي، انظر /translate)
-        // اسم الرابط يحتوي على "trans" عمدًا لتمييز الترجمة المُحوّلة بالذكاء الاصطناعي
-        // عن الترجمات الجاهزة الأصلية عند عرضها داخل Nuvio
-        const aiProxyUrl = `${protocol}://${host}/translate/trans.ass?subUrl=${encodeURIComponent(cand.url)}&geminiKey=${encodeURIComponent(geminiKey)}&groqKey=${encodeURIComponent(groqKey)}&deeplKey=${encodeURIComponent(deeplKey)}&openaiKey=${encodeURIComponent(openaiKey)}`;
-
-        aiSubs.push({
-          id: `trans_${idx + 1}`,
-          url: aiProxyUrl,
-          lang: 'ara'
-        });
+        const name = `${origBase} • ${sourceLabelOf(cand._source)} • ترجمة AI • ASS${packTag}`;
+        aiSubs.push({ id: `trans_${idx + 1}`, url: aiProxyUrl, lang: 'ara', name, title: name });
       });
-      console.log(`[subtitles] ${type}/${targetId} -> تمت إضافة ${aiSubs.length} رابط ترجمة AI (trans) من لغات: ${candidates.map(c => c.lang).join(', ')}`);
+      console.log(`[subtitles] ${type}/${targetId} -> تمت إضافة ${aiSubs.length} رابط ترجمة AI (trans)`);
     }
 
-    // القائمة النهائية: العربية الأصلية فقط + ترجمات AI (نخفي الترجمات الأجنبية غير
-    // المترجمة تمامًا حتى لو كانت متوفرة - يبقى استخدامها الوحيد كمصدر لترجمة AI أعلاه)
-    const combinedSubs = [...arabicSubs, ...aiSubs];
+    // القائمة النهائية: العربية الأصلية فقط + ترجمات AI (نزيل الحقول الداخلية قبل الإرسال)
+    const finalArabic = arabicSubs.map(({ _ext, _source, _lang, _seasonPack, origName, ...rest }) => rest);
+    const combinedSubs = [...finalArabic, ...aiSubs];
 
     return res.json({ subtitles: combinedSubs });
   } catch (error) {
@@ -1148,29 +1334,20 @@ const handleSubtitles = async (req, res) => {
   }
 };
 
-// فك ضغط ملف SubDL zip وإرجاع أول ملف ترجمة بداخله
+// فك ضغط ملف SubDL zip وإرجاع أول ملف ترجمة بداخله (يعيد استخدام نفس دالة الاستخراج
+// المستخدمة في مرحلة التحقق أعلاه، بدل تكرار منطق فك الضغط مرتين)
 app.get('/subdl-extract', async (req, res) => {
   const { zipUrl } = req.query;
   if (!zipUrl) return res.status(400).send("No zip URL");
 
   try {
     const zipRes = await axios.get(zipUrl, { responseType: 'arraybuffer', timeout: 12000 });
-    const zip = new AdmZip(Buffer.from(zipRes.data));
-    const entries = zip.getEntries().filter(e =>
-      /\.(srt|ass|ssa|vtt)$/i.test(e.entryName)
-    );
+    const extracted = extractFirstSubtitleFromZip(Buffer.from(zipRes.data));
+    if (!extracted || !extracted.content.trim()) return res.status(404).send("No subtitle file found in archive");
 
-    if (entries.length === 0) return res.status(404).send("No subtitle file found in archive");
-
-    // نفضّل ملف ass إن وجد، وإلا srt، وإلا أول ملف متاح
-    const chosen = entries.find(e => e.entryName.toLowerCase().endsWith('.ass'))
-      || entries.find(e => e.entryName.toLowerCase().endsWith('.srt'))
-      || entries[0];
-    const content = chosen.getData().toString('utf8');
-
-    const ext = chosen.entryName.split('.').pop().toLowerCase();
-    res.setHeader('Content-Type', ext === 'ass' || ext === 'ssa' ? 'text/x-ssa; charset=utf-8' : 'text/plain; charset=utf-8');
-    res.send(content);
+    const isAss = extracted.ext === 'ass' || extracted.ext === 'ssa';
+    res.setHeader('Content-Type', isAss ? 'text/x-ssa; charset=utf-8' : 'text/plain; charset=utf-8');
+    res.send(extracted.content);
   } catch (err) {
     logErr('subdl-extract', err);
     res.status(500).send("Failed to extract subtitle archive");
