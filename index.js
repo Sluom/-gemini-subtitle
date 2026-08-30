@@ -566,49 +566,20 @@ app.get(['/translate', '/translate/:label'], async (req, res) => {
 
   console.log(`[translate:${reqId}] بدء الطلب | gemini=${!!geminiKey} groq=${!!groqKey} deepl=${!!deeplKey} openai=${!!openaiKey} | src=${subUrl.slice(0, 90)}`);
 
-  // مؤقت زمني شامل: يبدأ من لحظة استلام الطلب (لحظة الضغط على رابط الترجمة) - إجباري 60 ثانية.
-  // لو انتهت المدة قبل ما تخلص الترجمة، نرجّع الملف الأصلي (غير مترجم) فورًا كخطة احتياطية
-  // بدل ما يتعلق المشغّل أو يفشل الطلب.
-  const TRANSLATE_TIMEOUT_MS = 60000;
-  let responded = false;
-  let latestOriginalText = null;
-
-  const timeoutTimer = setTimeout(() => {
-    if (responded) return;
-    responded = true;
-    console.log(`[translate:${reqId}] انتهت مهلة الـ ${TRANSLATE_TIMEOUT_MS / 1000}s، إرسال الملف الأصلي كخطة احتياطية | إجمالي الوقت: ${elapsed()}`);
-    if (latestOriginalText) {
-      res.setHeader('Content-Type', 'text/x-ssa; charset=utf-8');
-      res.send(latestOriginalText);
-    } else {
-      res.redirect(subUrl);
-    }
-  }, TRANSLATE_TIMEOUT_MS);
-
-  const finishOnce = (sendFn) => {
-    if (responded) return;
-    responded = true;
-    clearTimeout(timeoutTimer);
-    sendFn();
-  };
-
   let originalText;
   try {
     const fetchStart = Date.now();
     const subRes = await axios.get(subUrl, { responseType: 'text', timeout: 15000 });
     originalText = subRes.data;
-    latestOriginalText = originalText;
     console.log(`[translate:${reqId}] تم جلب الملف الأصلي خلال ${((Date.now() - fetchStart) / 1000).toFixed(1)}s (${originalText?.length || 0} حرف)`);
   } catch (err) {
     logErr('translate:fetchSub', err);
-    return finishOnce(() => res.redirect(subUrl));
+    return res.redirect(subUrl);
   }
-
-  if (responded) return; // انتهت المهلة أثناء جلب الملف الأصلي
 
   if (!originalText || typeof originalText !== 'string' || originalText.trim().length === 0) {
     console.log(`[translate:${reqId}] الملف الأصلي فارغ، إرسال المصدر كما هو`);
-    return finishOnce(() => res.redirect(subUrl));
+    return res.redirect(subUrl);
   }
 
   const isSourceAss = isAssUrl(subUrl) || /^\uFEFF?\[Script Info\]/im.test(originalText);
@@ -622,7 +593,6 @@ app.get(['/translate', '/translate/:label'], async (req, res) => {
 
     if (cueTexts.length) {
       const translated = await translateTextArray(cueTexts, keys);
-      if (responded) return; // انتهت المهلة أثناء الترجمة البنيوية
       if (translated && translated.length === cueTexts.length) {
         let outputText;
         if (assParsed) {
@@ -635,18 +605,14 @@ app.get(['/translate', '/translate/:label'], async (req, res) => {
           outputText = buildAssFromCues(srtParsed.map((c, i) => ({ start: c.start, end: c.end, text: translated[i] })));
         }
         console.log(`[translate:${reqId}] ترجمة بنيوية ناجحة (${cueTexts.length} سطر) -> ass | إجمالي الوقت: ${elapsed()}`);
-        return finishOnce(() => {
-          res.setHeader('Content-Type', 'text/x-ssa; charset=utf-8');
-          res.send(outputText);
-        });
+        res.setHeader('Content-Type', 'text/x-ssa; charset=utf-8');
+        return res.send(outputText);
       }
       console.log(`[translate:${reqId}] فشلت الترجمة البنيوية عبر كل المزودين، اللجوء للخطة الاحتياطية`);
     }
   } catch (e) {
     logErr('translate:structured', e);
   }
-
-  if (responded) return; // انتهت المهلة قبل الوصول للخطة الاحتياطية
 
   // 2) خطة احتياطية: ترجمة النص كاملًا كما كان سابقًا (بدون ضمان بنية ass صحيحة 100%)،
   // نحاول قدر الإمكان إبقاء نفس الصيغة/التاغات عبر التعليمات فقط
@@ -662,7 +628,6 @@ app.get(['/translate', '/translate/:label'], async (req, res) => {
   if (openaiKey) providers.push('openai');
 
   for (const provider of providers) {
-    if (responded) break; // انتهت المهلة أثناء المحاولات
     if (translatedText) break;
     try {
       if (provider === 'gemini') {
@@ -699,8 +664,6 @@ app.get(['/translate', '/translate/:label'], async (req, res) => {
     }
   }
 
-  if (responded) return; // انتهت المهلة قبل بناء الرد النهائي
-
   const finalResult = translatedText || originalText;
   // إن كان المصدر srt ولم ننجح بالترجمة البنيوية، نحوّله محليًا إلى ass صحيح على الأقل
   // (حتى لو النص لم يُترجم لأي سبب) - تفضيل ass يبقى قائمًا كأفضل جهد ممكن
@@ -711,10 +674,8 @@ app.get(['/translate', '/translate/:label'], async (req, res) => {
   }
 
   console.log(`[translate:${reqId}] ${translatedText ? 'تمت الترجمة (احتياطي)' : 'تعذرت الترجمة، إرسال النص الأصلي'} | إجمالي الوقت: ${elapsed()}`);
-  finishOnce(() => {
-    res.setHeader('Content-Type', 'text/x-ssa; charset=utf-8');
-    res.send(outputText);
-  });
+  res.setHeader('Content-Type', 'text/x-ssa; charset=utf-8');
+  res.send(outputText);
 });
 
 // ============= تحويل معرفات الأنمي (kitsu / mal / anilist / tmdb / tvdb) بشكل ثنائي الاتجاه =============
@@ -779,37 +740,6 @@ async function resolveExternalId(rawId, tmdbKey) {
     const parts = rawId.split(':');
     const prefix = parts[0];
 
-    // ---- IMDB (tt...): نبحث بقاعدة الأنمي عن العمل المطابق لنستخرج معرف kitsu المكافئ ----
-    // معرف IMDB نفسه هو الجزء الأول (مثال tt1234567:1:5)، وليس بادئة منفصلة، لذلك نتحقق
-    // بـ regex بدل تطابق حرفي - بدون هذا، مصادر الأنمي المتخصصة (kitsunekko/subanime/...)
-    // التي تُفهرس فقط بمعرف kitsu لن تُستعلم أبدًا عند تشغيل الأنمي بمعرف IMDB.
-    if (/^tt\d+$/.test(prefix)) {
-      const imdbId = prefix;
-      const season = parts[1] ? parseInt(parts[1]) : null;
-      const episode = parts[2] ? parseInt(parts[2]) : null;
-
-      const map = await getAnimeListMap();
-      const entry = map.find(e => {
-        if (!e.imdb_id) return false;
-        const ids = Array.isArray(e.imdb_id) ? e.imdb_id : String(e.imdb_id).split(',').map(s => s.trim());
-        return ids.includes(imdbId);
-      });
-
-      if (!entry) return null; // العمل غير موجود بقاعدة الأنمي (على الأغلب ليس أنمي)
-
-      const kitsuId = entry.kitsu_id || null;
-      let absoluteEp = null;
-      if (season != null && episode != null) {
-        const offset = entry.episode_offset?.tvdb ?? 0;
-        absoluteEp = episode - offset;
-        if (absoluteEp < 1) absoluteEp = null; // إزاحة غير منطقية، تجاهلها
-      } else {
-        absoluteEp = 1; // فيلم أو معرف بدون موسم/حلقة
-      }
-
-      return { imdbId: null, kitsuId, absoluteEp };
-    }
-
     // ---- كيتسو / مايال / أنيليست: الترقيم مطلق أصلاً ----
     if (prefix === 'kitsu' || prefix === 'mal' || prefix === 'anilist') {
       const externalId = parts[1];
@@ -857,6 +787,7 @@ async function resolveExternalId(rawId, tmdbKey) {
 
       // ابحث في قاعدة بيانات الأنمي أولاً لمعرفة إن كان العمل أنمي، ولإيجاد معرف kitsu المطابق
       const map = await getAnimeListMap();
+      const idField = prefix === 'tmdb' ? null : 'tvdb_id';
       let entry = null;
 
       if (prefix === 'tvdb') {
@@ -865,8 +796,6 @@ async function resolveExternalId(rawId, tmdbKey) {
       } else {
         entry = map.find(e => String(e.themoviedb_id?.tv) === String(externalId) && (season == null || (e.season?.tmdb ?? 1) === season));
         if (!entry) entry = map.find(e => String(e.themoviedb_id?.tv) === String(externalId));
-        // بعض أفلام الأنمي مُفهرسة بحقل movie لا tv - نجربه كخيار احتياطي
-        if (!entry) entry = map.find(e => String(e.themoviedb_id?.movie) === String(externalId));
       }
 
       let imdbId = entry ? firstImdb(entry) : null;
@@ -906,31 +835,12 @@ async function resolveExternalId(rawId, tmdbKey) {
   return null;
 }
 
-// يتحقق أن رابط ملف الترجمة يعمل فعليًا (صالح للتشغيل) قبل اعتماده
-async function isSubtitleLinkWorking(url) {
-  try {
-    const head = await axios.head(url, { timeout: 6000, validateStatus: s => s >= 200 && s < 400 });
-    if (head.status >= 200 && head.status < 400) return true;
-  } catch (e) {
-    // بعض السيرفرات لا تدعم HEAD، نجرب GET خفيف كبديل بدل استبعاد الرابط ظلمًا
-    try {
-      const get = await axios.get(url, { timeout: 6000, responseType: 'text', maxContentLength: 4000 });
-      return get.status >= 200 && get.status < 400 && !!get.data;
-    } catch (e2) {
-      return false;
-    }
-  }
-  return false;
-}
-
 // جلب مباشر من OpenSubtitles.com الرسمي باستخدام مفتاح API الخاص بالمستخدم
-// عربي فقط (إجباري) + جلب جميع الملفات المتاحة لكل نتيجة (مو أول ملف بس) + التحقق
-// أن كل رابط شغال فعليًا (صالح للتشغيل) قبل إضافته للقائمة
 async function fetchOpenSubtitlesDirect(imdbId, season, episode, apiKey) {
   if (!apiKey) return [];
   try {
     const cleanId = imdbId.replace('tt', '');
-    const params = new URLSearchParams({ imdb_id: cleanId, languages: 'ar' }); // عربي فقط - إجباري
+    const params = new URLSearchParams({ imdb_id: cleanId, languages: 'ar,en' });
     if (season) params.set('season_number', season);
     if (episode) params.set('episode_number', episode);
 
@@ -947,31 +857,19 @@ async function fetchOpenSubtitlesDirect(imdbId, season, episode, apiKey) {
     const out = [];
     for (const item of items) {
       const attrs = item.attributes;
-      const lang = (attrs?.language || '').toLowerCase();
-      if (lang && !lang.startsWith('ar')) continue; // تأكيد إضافي: عربي فقط
-
-      const files = attrs?.files || [];
-      for (const file of files) {
-        const fileId = file?.file_id;
-        if (!fileId) continue;
-        try {
-          const dl = await axios.post('https://api.opensubtitles.com/api/v1/download',
-            { file_id: fileId },
-            { headers: { 'Api-Key': apiKey.trim(), 'Content-Type': 'application/json', 'User-Agent': 'NuvioSubtitlesApp v1.0.0' }, timeout: 8000 }
-          );
-          const link = dl.data?.link;
-          if (!link) continue;
-
-          // فقط الروابط الصالحة للتشغيل فعليًا (إجباري)
-          const works = await isSubtitleLinkWorking(link);
-          if (works) {
-            out.push({ url: link, lang: 'ara' });
-          } else {
-            console.log(`[opensubtitles] تجاهل رابط لا يعمل: ${link.slice(0, 90)}`);
-          }
-        } catch (e) {
-          logErr('opensubtitles:download', e);
+      const fileUrl = attrs?.files?.[0]?.file_id;
+      if (!fileUrl) continue;
+      // نحتاج رابط تحميل فعلي عبر endpoint التحميل
+      try {
+        const dl = await axios.post('https://api.opensubtitles.com/api/v1/download',
+          { file_id: fileUrl },
+          { headers: { 'Api-Key': apiKey.trim(), 'Content-Type': 'application/json', 'User-Agent': 'NuvioSubtitlesApp v1.0.0' }, timeout: 8000 }
+        );
+        if (dl.data?.link) {
+          out.push({ url: dl.data.link, lang: attrs.language || 'en' });
         }
+      } catch (e) {
+        logErr('opensubtitles:download', e);
       }
     }
     return out;
@@ -1049,22 +947,18 @@ const handleSubtitles = async (req, res) => {
   let animeInfo = null;
 
   const idPrefix = targetId.split(':')[0];
-  const isImdbPrefix = /^tt\d+$/.test(idPrefix);
-  if (isImdbPrefix || ['kitsu', 'mal', 'anilist', 'tmdb', 'tvdb'].includes(idPrefix)) {
+  if (['kitsu', 'mal', 'anilist', 'tmdb', 'tvdb'].includes(idPrefix)) {
     animeInfo = await resolveExternalId(targetId, tmdbKey);
 
     // 1) أضف المعرف المكافئ بصيغة IMDB (موسم/حلقة قياسي) - يخدم OpenSubtitles/SubDL/الأغلبية
-    // (لا ينطبق على معرفات IMDB نفسها، فهي أصلاً بهذه الصيغة)
     if (animeInfo?.imdbId) {
       targetIds.push(animeInfo.imdbId);
-    } else if (!isImdbPrefix) {
+    } else {
       console.log(`[resolve] تعذر تحويل المعرف ${targetId} إلى IMDB${['tmdb', 'tvdb'].includes(idPrefix) && !tmdbKey ? ' (مفتاح TMDB غير مُدخل في الإعدادات)' : ''}`);
     }
 
     // 2) أضف المعرف المكافئ بصيغة kitsu + رقم حلقة مطلق - يخدم مصادر الأنمي المتخصصة
     //    (تُفهرس عادة بالترقيم المطلق بغض النظر عن الموسم الرسمي على TVDB)
-    // هذا هو الجسر المفقود سابقًا لمعرفات IMDB: بدونه، مصادر مثل kitsunekko/subanime
-    // التي تفهرس فقط بمعرف kitsu كانت لا تُستعلم أبدًا عند تشغيل الأنمي بمعرف IMDB.
     if (animeInfo?.kitsuId && animeInfo?.absoluteEp && idPrefix !== 'kitsu') {
       const kitsuEquivalent = `kitsu:${animeInfo.kitsuId}:${animeInfo.absoluteEp}`;
       if (!targetIds.includes(kitsuEquivalent)) targetIds.push(kitsuEquivalent);
@@ -1206,12 +1100,9 @@ const handleSubtitles = async (req, res) => {
     arabicSubs.sort(assFirst);
     nonArabicSubs.sort(assFirst);
 
-    // إضافة ترجمات الذكاء الاصطناعي - 10 نتائج إجبارية دائمًا (طالما فيه مصدر أجنبي
-    // واحد على الأقل + مفتاح AI) - تُبنى بشكل منفصل لضمان عدم حذفها
+    // إضافة ترجمات الذكاء الاصطناعي (حتى 10 نتائج) - تُبنى بشكل منفصل لضمان عدم حذفها
     // نختار المرشحين من لغات مختلفة قدر الإمكان (لا نكرر نفس اللغة إن وُجد بديل)،
     // مع تفضيل مصادر ASS أولًا، ونحافظ على نفس صيغة المصدر (ASS تبقى ASS) عند الترجمة.
-    // إذا كان عدد المصادر المتاحة أقل من 10، نكرر (ندور) على نفس المصادر بالتناوب
-    // حتى نصل للعدد المطلوب (10) دائمًا، بدل الاكتفاء بعدد المصادر الفعلي.
     const AI_MAX = 10;
     const hasAiKey = geminiKey || groqKey || deeplKey || openaiKey;
     const aiSubs = [];
@@ -1229,13 +1120,7 @@ const handleSubtitles = async (req, res) => {
           rest.push(cand);
         }
       }
-      const orderedCandidates = [...primary, ...rest];
-
-      // إجبار العدد على 10 دائمًا عبر التكرار بالتناوب عند نقص المصادر
-      const candidates = [];
-      for (let i = 0; i < AI_MAX; i++) {
-        candidates.push(orderedCandidates[i % orderedCandidates.length]);
-      }
+      const candidates = [...primary, ...rest].slice(0, AI_MAX);
 
       candidates.forEach((cand, idx) => {
         // الناتج دائمًا بصيغة ass (نبنيها بأنفسنا بالكود من التوقيت الأصلي، انظر /translate)
