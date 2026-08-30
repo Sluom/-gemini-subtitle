@@ -1,0 +1,16 @@
+{
+  "name": "nuvio-gemini-subtitles",
+  "version": "1.0.0",
+  "description": "Full-Featured Nuvio ASS/SRT Subtitles Addon powered by Gemini",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@google/genai": "^0.1.1",
+    "express": "^4.19.2",
+    "cors": "^2.8.5",
+    "axios": "^1.7.2"
+  }
+}
+
