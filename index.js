@@ -1,16 +1,17 @@
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
+const zlib = require('zlib');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
 const manifest = {
-  id: "org.nuvio.universal.mega.subtitles",
-  version: "20.0.0",
-  name: "Universal Mega Subtitles Hub & AI",
-  description: "جلب الترجمات الشاملة (OpenSubtitles, SubDL, SubSource, AnimeTosho, Jimaku, Wyzie) مع دعم Gemini/Groq/DeepL",
+  id: "org.nuvio.universal.gemini.subtitles",
+  version: "23.0.0",
+  name: "Universal Subtitles & Gemini AI",
+  description: "جلب الترجمات الشاملة المباشرة مع فك الضغط التلقائي والترجمة الفورية عبر الذكاء الاصطناعي",
   resources: [
     {
       name: "subtitles",
@@ -23,7 +24,38 @@ const manifest = {
   catalogs: []
 };
 
-// مسار فحص وتجربة المفاتيح الدقيق
+// مسار بروكسي لفك الضغط وتمرير النصوص بترميز سليم للمشغل
+app.get('/sub-proxy', async (req, res) => {
+  const { url } = req.query;
+  if (!url) return res.status(400).send("No URL provided");
+
+  try {
+    const response = await axios.get(url, {
+      responseType: 'arraybuffer',
+      timeout: 8000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)',
+        'Accept': '*/*'
+      }
+    });
+
+    let buffer = Buffer.from(response.data);
+
+    if (buffer.length > 2 && buffer[0] === 0x1f && buffer[1] === 0x8b) {
+      try {
+        buffer = zlib.gunzipSync(buffer);
+      } catch (e) {}
+    }
+
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    return res.send(buffer.toString('utf8'));
+  } catch (err) {
+    return res.redirect(url);
+  }
+});
+
+// مسار فحص وتجربة المفاتيح
 app.post('/test-key', async (req, res) => {
   const { provider, key } = req.body;
   if (!key) return res.json({ success: false, message: "يرجى إدخال المفتاح أولاً ⚠️" });
@@ -31,7 +63,6 @@ app.post('/test-key', async (req, res) => {
   const cleanKey = key.trim();
 
   try {
-    // 1. فحص Gemini المباشر الخالي من أخطاء أسماء النماذج
     if (provider === 'gemini') {
       const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${cleanKey}`;
       const r = await axios.get(url, { timeout: 7000 });
@@ -40,43 +71,30 @@ app.post('/test-key', async (req, res) => {
       }
     }
 
-    // 2. فحص OpenSubtitles.com
     if (provider === 'opensub') {
       const r = await axios.get('https://api.opensubtitles.com/api/v1/subtitles?query=Inception', {
-        headers: {
-          'Api-Key': cleanKey,
-          'User-Agent': 'NuvioSubtitlesApp v1.0.0',
-          'Accept': 'application/json'
-        },
+        headers: { 'Api-Key': cleanKey, 'User-Agent': 'NuvioSubtitlesApp v1.0.0', 'Accept': 'application/json' },
         timeout: 7000
       });
-      if (r.status === 200 || r.data?.data) {
-        return res.json({ success: true, message: "مفتاح OpenSubtitles صالح وشغال 100% ✅" });
-      }
+      if (r.status === 200 || r.data?.data) return res.json({ success: true, message: "مفتاح OpenSubtitles صالح وشغال 100% ✅" });
     }
 
-    // 3. فحص SubSource
     if (provider === 'subsource') {
       const r = await axios.get('https://api.subsource.net/api/v1/movies/search?query=Inception', {
         headers: { 'X-API-Key': cleanKey, 'Accept': 'application/json' },
         timeout: 7000
       }).catch(e => e.response);
-      if (r && (r.status === 200 || r.status === 404)) {
-        return res.json({ success: true, message: "مفتاح SubSource صالح وشغال 100% ✅" });
-      }
+      if (r && (r.status === 200 || r.status === 404)) return res.json({ success: true, message: "مفتاح SubSource صالح وشغال 100% ✅" });
       return res.json({ success: true, message: "تم تسجيل مفتاح SubSource بنجاح ✅" });
     }
 
-    // 4. فحص Groq
     if (provider === 'groq') {
       const r = await axios.get('https://api.groq.com/openai/v1/models', {
-        headers: { Authorization: `Bearer ${cleanKey}` },
-        timeout: 5000
+        headers: { Authorization: `Bearer ${cleanKey}` }, timeout: 5000
       });
       if (r.status === 200) return res.json({ success: true, message: "مفتاح Groq صالح 100% ✅" });
     }
 
-    // 5. فحص DeepL
     if (provider === 'deepl') {
       const isFree = cleanKey.endsWith(':fx');
       const url = isFree ? 'https://api-free.deepl.com/v2/usage' : 'https://api.deepl.com/v2/usage';
@@ -84,41 +102,29 @@ app.post('/test-key', async (req, res) => {
       if (r.status === 200) return res.json({ success: true, message: "مفتاح DeepL صالح 100% ✅" });
     }
 
-    // 6. فحص OpenAI
     if (provider === 'openai') {
       const r = await axios.get('https://api.openai.com/v1/models', {
-        headers: { Authorization: `Bearer ${cleanKey}` },
-        timeout: 5000
+        headers: { Authorization: `Bearer ${cleanKey}` }, timeout: 5000
       });
       if (r.status === 200) return res.json({ success: true, message: "مفتاح OpenAI صالح 100% ✅" });
     }
 
-    // 7. فحص SubDL
     if (provider === 'subdl') {
       const r = await axios.get(`https://api.subdl.com/api/v1/subtitles?api_key=${cleanKey}&film_name=Inception`, { timeout: 5000 });
       if (r.data?.status === true || r.data?.results) return res.json({ success: true, message: "مفتاح SubDL صالح 100% ✅" });
     }
 
-    // 8. فحص Jimaku
-    if (provider === 'jimaku') {
-      return res.json({ success: true, message: "مفتاح Jimaku صالح ومحفوظ ✅" });
-    }
+    if (provider === 'jimaku') return res.json({ success: true, message: "مفتاح Jimaku صالح ومحفوظ ✅" });
+    if (provider === 'wyzie') return res.json({ success: true, message: "مفتاح Wyzie صالح ومحفوظ ✅" });
 
-    // 9. فحص TMDB
     if (provider === 'tmdb') {
       const r = await axios.get(`https://api.themoviedb.org/3/movie/550?api_key=${cleanKey}`, { timeout: 5000 });
       if (r.data?.id) return res.json({ success: true, message: "مفتاح TMDB صالح 100% ✅" });
     }
 
-    // 10. فحص Wyzie
-    if (provider === 'wyzie') {
-      return res.json({ success: true, message: "مفتاح Wyzie صالح ومحفوظ ✅" });
-    }
-
     return res.json({ success: false, message: "المفتاح غير صالح ❌" });
   } catch (err) {
-    const errorDetails = err.response?.data?.error?.message || err.response?.data?.message || err.message;
-    return res.json({ success: false, message: `فشل الفحص: ${errorDetails || 'تأكد من المفتاح'} ❌` });
+    return res.json({ success: false, message: "فشل الفحص: تأكد من صحة المفتاح ❌" });
   }
 });
 
@@ -131,12 +137,13 @@ app.get(['/', '/configure'], (req, res) => {
     <head>
       <meta charset="UTF-8">
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>لوحة التحكم الشاملة للترجمات والأنمي</title>
+      <title>Universal Subtitles & Gemini AI</title>
       <style>
         body { font-family: system-ui, -apple-system, sans-serif; background: #0b0f19; color: #f8fafc; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; padding: 20px; box-sizing: border-box; }
         .card { background: #1e293b; padding: 25px; border-radius: 16px; width: 100%; max-width: 530px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); border: 1px solid #334155; }
         h2 { color: #38bdf8; margin-top: 0; font-size: 20px; text-align: center; }
         h3 { color: #94a3b8; font-size: 14px; margin: 15px 0 8px; border-bottom: 1px solid #334155; padding-bottom: 4px; }
+        .notice-box { background: rgba(56, 189, 248, 0.1); border: 1px solid rgba(56, 189, 248, 0.3); padding: 12px; border-radius: 8px; font-size: 12px; color: #bae6fd; margin-bottom: 15px; line-height: 1.5; }
         .field-group { margin-bottom: 12px; }
         .label-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
         label { font-size: 13px; color: #cbd5e1; font-weight: 500; }
@@ -150,13 +157,18 @@ app.get(['/', '/configure'], (req, res) => {
         .test-msg { font-size: 11px; margin-top: 4px; display: none; }
         .btn-install { width: 100%; padding: 14px; margin-top: 20px; border-radius: 8px; border: none; background: #0284c7; color: #fff; font-weight: bold; cursor: pointer; font-size: 15px; }
         .btn-install:hover { background: #0369a1; }
+        #installStatus { display: none; margin-top: 10px; font-size: 12px; color: #fbbf24; text-align: center; font-weight: 500; }
       </style>
     </head>
     <body>
       <div class="card">
-        <h2>إعدادات كافة مواقع ومفاتيح الترجمة</h2>
+        <h2>Universal Subtitles & Gemini AI</h2>
         
-        <h3>🤖 محركات الذكاء الاصطناعي (للترجمة الفورية)</h3>
+        <div class="notice-box">
+          ⏳ <b>تنبيه:</b> في حال تأخر الاستجابة، السيرفر يستغرق بضع ثوانٍ للاستيقاظ من وضع السكون.
+        </div>
+
+        <h3>🤖 محركات الذكاء الاصطناعي (حتى 5 نتائج في نهاية القائمة)</h3>
         <div class="field-group">
           <div class="label-row">
             <label>مفتاح Google Gemini API:</label>
@@ -205,7 +217,7 @@ app.get(['/', '/configure'], (req, res) => {
           <div id="msgOpenai" class="test-msg"></div>
         </div>
 
-        <h3>🎌 مواقع ومصادر ترجمات الأنمي التخصصية</h3>
+        <h3>🎌 مواقع ومصادر ترجمات الأنمي</h3>
         <div class="field-group">
           <div class="label-row">
             <label>مفتاح Jimaku.cc API (اختياري للأنمي):</label>
@@ -299,6 +311,7 @@ app.get(['/', '/configure'], (req, res) => {
         </div>
 
         <button class="btn-install" onclick="install()">تثبيت / تحديث في Nuvio</button>
+        <div id="installStatus">جاري توجيه التثبيت إلى Nuvio...</div>
       </div>
 
       <script>
@@ -331,6 +344,9 @@ app.get(['/', '/configure'], (req, res) => {
         }
 
         function install() {
+          const statusEl = document.getElementById('installStatus');
+          statusEl.style.display = 'block';
+
           const geminiKey = document.getElementById('geminiKey').value.trim();
           const groqKey = document.getElementById('groqKey').value.trim();
           const deeplKey = document.getElementById('deeplKey').value.trim();
@@ -377,7 +393,6 @@ app.get('/translate', async (req, res) => {
 
     let translatedText = null;
 
-    // 1. ترجمة Gemini مع التبديل التلقائي للنماذج المتاحة
     if (geminiKey && !translatedText) {
       const modelsToTry = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-pro'];
       for (const m of modelsToTry) {
@@ -396,7 +411,6 @@ app.get('/translate', async (req, res) => {
       }
     }
 
-    // 2. Groq
     if (groqKey && !translatedText) {
       try {
         const groqRes = await axios.post('https://api.groq.com/openai/v1/chat/completions', {
@@ -436,7 +450,7 @@ async function resolveAnimeMeta(rawId) {
   return null;
 }
 
-// معالج جلب الترجمات الشامل لكافة المواقع
+// معالج جلب الترجمات الشامل
 const handleSubtitles = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Content-Type', 'application/json');
@@ -595,39 +609,43 @@ const handleSubtitles = async (req, res) => {
       if (Array.isArray(list)) rawSubtitles.push(...list);
     });
 
+    const host = req.get('host');
+    const protocol = req.protocol;
+
     const arabicSubs = [];
-    const englishSubs = [];
-    const otherSubs = [];
+    const nonArabicSubs = [];
     const seenUrls = new Set();
 
     for (const sub of rawSubtitles) {
       if (sub && sub.url && !seenUrls.has(sub.url)) {
         seenUrls.add(sub.url);
-        
+
+        const cleanProxyUrl = `${protocol}://${host}/sub-proxy?url=${encodeURIComponent(sub.url)}`;
+
         let l = (sub.lang || '').toLowerCase();
         if (l === 'ara' || l === 'ar' || l === 'arabic' || l.includes('ara')) {
-          arabicSubs.push({ id: `sub_ar_${arabicSubs.length + 1}`, url: sub.url, lang: 'ara' });
-        } else if (l === 'eng' || l === 'en' || l === 'english' || l.includes('eng')) {
-          englishSubs.push({ id: `sub_en_${englishSubs.length + 1}`, url: sub.url, lang: 'eng' });
+          arabicSubs.push({ id: `sub_ar_${arabicSubs.length + 1}`, url: cleanProxyUrl, lang: 'ara' });
         } else {
-          otherSubs.push({ id: `sub_ot_${otherSubs.length + 1}`, url: sub.url, lang: l || 'ara' });
+          nonArabicSubs.push({ id: `sub_other_${nonArabicSubs.length + 1}`, url: sub.url, cleanUrl: cleanProxyUrl, lang: l || 'eng' });
         }
       }
     }
 
-    let combinedSubs = [...arabicSubs, ...englishSubs, ...otherSubs];
+    // تجهيز قائمة الترجمات الأساسية (العربية أولاً ثم اللغات الأخرى)
+    let combinedSubs = [...arabicSubs, ...nonArabicSubs.map(s => ({ id: s.id, url: s.cleanUrl, lang: s.lang }))];
 
+    // إضافة ما يصل إلى 5 ترجمات مولدة بالذكاء الاصطناعي في نهاية القائمة
     const hasAiKey = geminiKey || groqKey || deeplKey || openaiKey;
-    if (combinedSubs.length > 0 && hasAiKey) {
-      const sourceSub = englishSubs[0] || combinedSubs[0];
-      const host = req.get('host');
-      const protocol = req.protocol;
-      const aiProxyUrl = `${protocol}://${host}/translate?subUrl=${encodeURIComponent(sourceSub.url)}&geminiKey=${geminiKey}&groqKey=${groqKey}&deeplKey=${deeplKey}&openaiKey=${openaiKey}&format=${prefFormat}`;
+    if (nonArabicSubs.length > 0 && hasAiKey) {
+      const candidates = nonArabicSubs.slice(0, 5);
+      candidates.forEach((cand, idx) => {
+        const aiProxyUrl = `${protocol}://${host}/translate?subUrl=${encodeURIComponent(cand.url)}&geminiKey=${geminiKey}&groqKey=${groqKey}&deeplKey=${deeplKey}&openaiKey=${openaiKey}&format=${prefFormat}`;
 
-      combinedSubs.unshift({
-        id: `ai_sub_main`,
-        url: aiProxyUrl,
-        lang: 'ara'
+        combinedSubs.push({
+          id: `ai_sub_${idx + 1}`,
+          url: aiProxyUrl,
+          lang: 'ara'
+        });
       });
     }
 
