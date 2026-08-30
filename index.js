@@ -8,17 +8,17 @@ app.use(cors());
 app.use(express.json());
 
 const manifest = {
-  id: "org.nuvio.ultimate.allsubtitles",
-  version: "8.0.0",
-  name: "Mega Subtitles Hub & Gemini AI",
-  description: "جلب الترجمات الشاملة من (Subscene, SubDL, OpenSubtitles, YTS, Addic7ed, Podnapisi, Kitsunekko, Subanime, TVsubtitles) مع دعم Gemini",
+  id: "org.nuvio.universal.meta.subtitles",
+  version: "10.0.0",
+  name: "Universal Meta Subtitles & Gemini AI",
+  description: "جلب الترجمات الشاملة بتحويل معرفات Kitsu, AniList, TMDB, TVDB, IMDb مع دعم Gemini",
   resources: ["subtitles"],
   types: ["movie", "series", "anime", "other"],
   idPrefixes: ["tt", "kitsu", "tmdb", "tvdb", "anilist", "mal"],
   catalogs: []
 };
 
-// صفحة التخصيص لجميع المصادر ومفاتيح الـ API
+// صفحة التخصيص لجميع المفاتيح والإعدادات
 app.get(['/', '/configure'], (req, res) => {
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.send(`
@@ -41,12 +41,18 @@ app.get(['/', '/configure'], (req, res) => {
     </head>
     <body>
       <div class="card">
-        <h2>إعدادات كافة مواقع الترجمة العربية و Gemini</h2>
+        <h2>إعدادات المعرفات ومفاتيح الـ API</h2>
         
         <label>مفتاح Gemini API (للترجمة الفورية):</label>
         <input type="text" id="geminiKey" placeholder="AIzaSy...">
 
-        <label>مفتاح SubDL API (اختياري لجلب مباشر أسرع):</label>
+        <label>مفتاح TMDB API (اختياري لتحويل دقيق وسريع):</label>
+        <input type="text" id="tmdbKey" placeholder="TMDB Read Access Token / API Key">
+
+        <label>مفتاح TVDB API (اختياري):</label>
+        <input type="text" id="tvdbKey" placeholder="TVDB API Key">
+
+        <label>مفتاح SubDL API (اختياري):</label>
         <input type="text" id="subdlKey" placeholder="SubDL API Key">
 
         <label>مفتاح OpenSubtitles.com API (اختياري):</label>
@@ -72,6 +78,8 @@ app.get(['/', '/configure'], (req, res) => {
       <script>
         function install() {
           const geminiKey = document.getElementById('geminiKey').value.trim();
+          const tmdbKey = document.getElementById('tmdbKey').value.trim();
+          const tvdbKey = document.getElementById('tvdbKey').value.trim();
           const subdlKey = document.getElementById('subdlKey').value.trim();
           const openSubKey = document.getElementById('openSubKey').value.trim();
           const limit = document.getElementById('subLimit').value;
@@ -79,6 +87,8 @@ app.get(['/', '/configure'], (req, res) => {
 
           const config = btoa(JSON.stringify({
             geminiKey,
+            tmdbKey,
+            tvdbKey,
             subdlKey,
             openSubKey,
             limit: parseInt(limit),
@@ -115,7 +125,7 @@ app.get('/translate', async (req, res) => {
     }
 
     const ai = new GoogleGenAI({ apiKey: key });
-    const prompt = `Translate this subtitle into accurate Arabic with perfect timing. Maintain all original timestamps and formatting:\n\n${originalText.slice(0, 30000)}`;
+    const prompt = `Translate this subtitle into accurate, natural Arabic with exact timing preservation. Output ONLY the translated subtitle content without explanations:\n\n${originalText.slice(0, 30000)}`;
 
     const response = await ai.models.generateContent({
       model: 'gemini-1.5-flash',
@@ -130,7 +140,57 @@ app.get('/translate', async (req, res) => {
   }
 });
 
-// معالج جلب الترجمات الشامل من كافة المواقع
+// دوال تحويل المعرفات التلقائية (Mapping Resolvers)
+async function resolveAnimeMeta(rawId) {
+  try {
+    if (rawId.startsWith('kitsu:')) {
+      const parts = rawId.split(':');
+      const kitsuId = parts[1];
+      const ep = parts[2] || '1';
+      const res = await axios.get(`https://kitsu.io/api/edge/anime/${kitsuId}`, { timeout: 3500 });
+      const title = res.data?.data?.attributes?.canonicalTitle || res.data?.data?.attributes?.titles?.en;
+      
+      const stremRes = await axios.get(`https://anime-kitsu.strem.fun/meta/anime/kitsu:${kitsuId}.json`, { timeout: 3000 }).catch(() => null);
+      const imdbId = stremRes?.data?.meta?.imdb_id ? `${stremRes.data.meta.imdb_id}:1:${ep}` : null;
+      return { imdbId, title, ep };
+    }
+    
+    if (rawId.startsWith('anilist:')) {
+      const parts = rawId.split(':');
+      const anilistId = parts[1];
+      const ep = parts[2] || '1';
+      const res = await axios.post('https://graphql.anilist.co', {
+        query: `query ($id: Int) { Media(id: $id, type: ANIME) { title { romaji english } idMal } }`,
+        variables: { id: parseInt(anilistId) }
+      }, { timeout: 3500 });
+      const media = res.data?.data?.Media;
+      const title = media?.title?.english || media?.title?.romaji;
+      return { imdbId: null, title, ep };
+    }
+  } catch (e) {}
+  return null;
+}
+
+async function resolveTmdbToImdb(rawId, tmdbKey, type) {
+  if (!rawId.startsWith('tmdb:') || !tmdbKey) return null;
+  try {
+    const parts = rawId.replace('tmdb:', '').split(':');
+    const tmdbId = parts[0];
+    const s = parts[1];
+    const ep = parts[2];
+    const endpoint = (type === 'series' || s) 
+      ? `https://api.themoviedb.org/3/tv/${tmdbId}/external_ids?api_key=${tmdbKey}`
+      : `https://api.themoviedb.org/3/movie/${tmdbId}/external_ids?api_key=${tmdbKey}`;
+    
+    const res = await axios.get(endpoint, { timeout: 3500 });
+    if (res.data?.imdb_id) {
+      return (s && ep) ? `${res.data.imdb_id}:${s}:${ep}` : res.data.imdb_id;
+    }
+  } catch (e) {}
+  return null;
+}
+
+// معالج جلب الترجمات الشامل
 const handleSubtitles = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Content-Type', 'application/json');
@@ -145,8 +205,8 @@ const handleSubtitles = async (req, res) => {
 
   let limit = 40;
   let geminiKey = '';
+  let tmdbKey = '';
   let subdlKey = '';
-  let openSubKey = '';
   let prefFormat = 'ass';
 
   if (req.params.config) {
@@ -154,8 +214,8 @@ const handleSubtitles = async (req, res) => {
       const parsedConfig = JSON.parse(Buffer.from(req.params.config, 'base64').toString('utf8'));
       if (parsedConfig.limit) limit = parsedConfig.limit;
       if (parsedConfig.geminiKey) geminiKey = parsedConfig.geminiKey;
+      if (parsedConfig.tmdbKey) tmdbKey = parsedConfig.tmdbKey;
       if (parsedConfig.subdlKey) subdlKey = parsedConfig.subdlKey;
-      if (parsedConfig.openSubKey) openSubKey = parsedConfig.openSubKey;
       if (parsedConfig.format) prefFormat = parsedConfig.format;
     } catch (e) {}
   }
@@ -165,44 +225,55 @@ const handleSubtitles = async (req, res) => {
     'Accept': 'application/json'
   };
 
-  const requests = [];
+  const targetIdsToFetch = [targetId];
 
-  // 1. OpenSubtitles v3 & Community
-  requests.push(
-    axios.get(`https://opensubtitles-v3.strem.io/subtitles/${type}/${targetId}.json`, { headers: clientHeaders, timeout: 4000 }).then(r => r.data?.subtitles || []).catch(() => []),
-    axios.get(`https://opensubtitles.strem.fun/subtitles/${type}/${targetId}.json`, { headers: clientHeaders, timeout: 4000 }).then(r => r.data?.subtitles || []).catch(() => [])
-  );
-
-  // 2. SubDL (API أو السيرفر المباشر)
-  if (subdlKey) {
-    requests.push(
-      axios.get(`https://api.subdl.com/api/v1/subtitles?api_key=${subdlKey}&imdb_id=${targetId}&languages=ar,en`, { timeout: 4000 })
-        .then(r => (r.data?.subtitles || []).map(s => ({ id: `subdl_${s.id}`, url: `https://dl.subdl.com${s.url}`, lang: s.language === 'Arabic' ? 'ara' : 'eng' }))).catch(() => [])
-    );
-  } else {
-    requests.push(
-      axios.get(`https://subdl-stremio.vercel.app/subtitles/${type}/${targetId}.json`, { headers: clientHeaders, timeout: 4000 }).then(r => r.data?.subtitles || []).catch(() => [])
-    );
+  // 1. تحويل معرفات الأنمي (Kitsu & AniList)
+  if (targetId.startsWith('kitsu:') || targetId.startsWith('anilist:')) {
+    const animeData = await resolveAnimeMeta(targetId);
+    if (animeData?.imdbId) targetIdsToFetch.push(animeData.imdbId);
   }
 
-  // 3. خوادم ومصادر ترجمات Subscene و Addic7ed و Podnapisi و TVsubtitles
-  requests.push(
-    axios.get(`https://subscene.strem.fun/subtitles/${type}/${targetId}.json`, { headers: clientHeaders, timeout: 4000 }).then(r => r.data?.subtitles || []).catch(() => []),
-    axios.get(`https://addic7ed.strem.fun/subtitles/${type}/${targetId}.json`, { headers: clientHeaders, timeout: 4000 }).then(r => r.data?.subtitles || []).catch(() => []),
-    axios.get(`https://podnapisi.strem.fun/subtitles/${type}/${targetId}.json`, { headers: clientHeaders, timeout: 4000 }).then(r => r.data?.subtitles || []).catch(() => [])
-  );
+  // 2. تحويل معرفات TMDB
+  if (targetId.startsWith('tmdb:')) {
+    const resolvedImdb = await resolveTmdbToImdb(targetId, tmdbKey, type);
+    if (resolvedImdb) targetIdsToFetch.push(resolvedImdb);
+  }
 
-  // 4. خوادم ترجمات YTS / YIFY
-  requests.push(
-    axios.get(`https://yifysubtitles.strem.fun/subtitles/${type}/${targetId}.json`, { headers: clientHeaders, timeout: 4000 }).then(r => r.data?.subtitles || []).catch(() => [])
-  );
+  const requests = [];
 
-  // 5. مصادر الأنمي المتخصصة (Kitsunekko, Subanime, Jimaku, Anime-Subtitles)
-  if (targetId.startsWith('kitsu') || targetId.startsWith('anilist') || targetId.startsWith('mal')) {
+  for (const fetchId of targetIdsToFetch) {
+    const fetchType = (fetchId.startsWith('kitsu') || fetchId.startsWith('anilist') || type === 'anime') ? 'series' : type;
+
+    // OpenSubtitles v3 & OpenSubtitles Community
     requests.push(
-      axios.get(`https://anime-subtitles.strem.fun/subtitles/${type}/${targetId}.json`, { headers: clientHeaders, timeout: 4000 }).then(r => r.data?.subtitles || []).catch(() => []),
-      axios.get(`https://kitsunekko-subtitles.strem.fun/subtitles/${type}/${targetId}.json`, { headers: clientHeaders, timeout: 4000 }).then(r => r.data?.subtitles || []).catch(() => []),
-      axios.get(`https://subanime.strem.fun/subtitles/${type}/${targetId}.json`, { headers: clientHeaders, timeout: 4000 }).then(r => r.data?.subtitles || []).catch(() => [])
+      axios.get(`https://opensubtitles-v3.strem.io/subtitles/${fetchType}/${fetchId}.json`, { headers: clientHeaders, timeout: 4000 }).then(r => r.data?.subtitles || []).catch(() => []),
+      axios.get(`https://opensubtitles.strem.fun/subtitles/${fetchType}/${fetchId}.json`, { headers: clientHeaders, timeout: 4000 }).then(r => r.data?.subtitles || []).catch(() => [])
+    );
+
+    // مصادر الأنمي المتخصصة (Anime-Subtitles, Kitsunekko, Subanime)
+    if (fetchId.startsWith('kitsu') || fetchId.startsWith('anilist') || fetchId.startsWith('mal') || type === 'anime') {
+      requests.push(
+        axios.get(`https://anime-subtitles.strem.fun/subtitles/series/${fetchId}.json`, { headers: clientHeaders, timeout: 4000 }).then(r => r.data?.subtitles || []).catch(() => []),
+        axios.get(`https://kitsunekko-subtitles.strem.fun/subtitles/series/${fetchId}.json`, { headers: clientHeaders, timeout: 4000 }).then(r => r.data?.subtitles || []).catch(() => []),
+        axios.get(`https://subanime.strem.fun/subtitles/series/${fetchId}.json`, { headers: clientHeaders, timeout: 4000 }).then(r => r.data?.subtitles || []).catch(() => [])
+      );
+    }
+
+    // SubDL & Subscene & YTS
+    if (subdlKey && fetchId.startsWith('tt')) {
+      requests.push(
+        axios.get(`https://api.subdl.com/api/v1/subtitles?api_key=${subdlKey}&imdb_id=${fetchId}&languages=ar,en`, { timeout: 4000 })
+          .then(r => (r.data?.subtitles || []).map(s => ({ id: `subdl_${s.id}`, url: `https://dl.subdl.com${s.url}`, lang: s.language === 'Arabic' ? 'ara' : 'eng' }))).catch(() => [])
+      );
+    } else {
+      requests.push(
+        axios.get(`https://subdl-stremio.vercel.app/subtitles/${fetchType}/${fetchId}.json`, { headers: clientHeaders, timeout: 4000 }).then(r => r.data?.subtitles || []).catch(() => [])
+      );
+    }
+
+    requests.push(
+      axios.get(`https://subscene.strem.fun/subtitles/${fetchType}/${fetchId}.json`, { headers: clientHeaders, timeout: 4000 }).then(r => r.data?.subtitles || []).catch(() => []),
+      axios.get(`https://yifysubtitles.strem.fun/subtitles/${fetchType}/${fetchId}.json`, { headers: clientHeaders, timeout: 4000 }).then(r => r.data?.subtitles || []).catch(() => [])
     );
   }
 
@@ -213,7 +284,6 @@ const handleSubtitles = async (req, res) => {
       if (Array.isArray(list)) subtitles.push(...list);
     });
 
-    // إزالة التكرار
     const uniqueSubs = [];
     const seenUrls = new Set();
     for (const sub of subtitles) {
@@ -223,7 +293,7 @@ const handleSubtitles = async (req, res) => {
       }
     }
 
-    // إدراج خيار الترجمة الفورية عبر Gemini في أعلى القائمة
+    // إدراج ترجمة Gemini المباشرة في أول خيار
     if (uniqueSubs.length > 0) {
       const bestSource = uniqueSubs.find(s => s.lang === 'eng' || s.lang === 'en') || uniqueSubs[0];
       const host = req.get('host');
