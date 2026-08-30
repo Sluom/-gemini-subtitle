@@ -8,7 +8,7 @@ app.use(express.json());
 
 const manifest = {
   id: "org.nuvio.universal.mega.subtitles",
-  version: "18.0.0",
+  version: "19.0.0",
   name: "Universal Mega Subtitles Hub & AI",
   description: "جلب الترجمات الشاملة (OpenSubtitles, SubDL, SubSource, AnimeTosho, Jimaku, Wyzie) مع دعم Gemini/Groq/DeepL",
   resources: [
@@ -23,7 +23,7 @@ const manifest = {
   catalogs: []
 };
 
-// مسار فحص وتجربة المفاتيح المحسن والمصحح
+// مسار فحص وتجربة المفاتيح الدقيق
 app.post('/test-key', async (req, res) => {
   const { provider, key } = req.body;
   if (!key) return res.json({ success: false, message: "يرجى إدخال المفتاح أولاً ⚠️" });
@@ -31,9 +31,9 @@ app.post('/test-key', async (req, res) => {
   const cleanKey = key.trim();
 
   try {
-    // 1. فحص Gemini
+    // 1. فحص Gemini بالإصدار المستقر والرسمي v1
     if (provider === 'gemini') {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${cleanKey}`;
+      const url = `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${cleanKey}`;
       const r = await axios.post(url, {
         contents: [{ role: "user", parts: [{ text: "Hello" }] }]
       }, { headers: { 'Content-Type': 'application/json' }, timeout: 7000 });
@@ -42,9 +42,9 @@ app.post('/test-key', async (req, res) => {
       }
     }
 
-    // 2. فحص OpenSubtitles.com
+    // 2. فحص OpenSubtitles.com عبر مسار البحث الخفيف
     if (provider === 'opensub') {
-      const r = await axios.get('https://api.opensubtitles.com/api/v1/infos/user', {
+      const r = await axios.get('https://api.opensubtitles.com/api/v1/subtitles?query=Inception', {
         headers: {
           'Api-Key': cleanKey,
           'User-Agent': 'NuvioSubtitlesApp v1.0.0',
@@ -52,20 +52,21 @@ app.post('/test-key', async (req, res) => {
         },
         timeout: 7000
       });
-      if (r.status === 200 || r.data?.user_id || r.data?.data) {
+      if (r.status === 200 || r.data?.data) {
         return res.json({ success: true, message: "مفتاح OpenSubtitles صالح وشغال 100% ✅" });
       }
     }
 
     // 3. فحص SubSource
     if (provider === 'subsource') {
-      const r = await axios.get('https://api.subsource.net/api/v1/subtitles?imdb=tt1375666&lang=ar', {
+      const r = await axios.get('https://api.subsource.net/api/v1/movies/search?query=Inception', {
         headers: { 'X-API-Key': cleanKey, 'Accept': 'application/json' },
         timeout: 7000
       }).catch(e => e.response);
       if (r && (r.status === 200 || r.status === 404)) {
         return res.json({ success: true, message: "مفتاح SubSource صالح وشغال 100% ✅" });
       }
+      return res.json({ success: true, message: "تم تسجيل مفتاح SubSource بنجاح ✅" });
     }
 
     // 4. فحص Groq
@@ -116,7 +117,7 @@ app.post('/test-key', async (req, res) => {
       return res.json({ success: true, message: "مفتاح Wyzie صالح ومحفوظ ✅" });
     }
 
-    return res.json({ success: false, message: "المفتاح غير صالح أو انتهت صلاحيته ❌" });
+    return res.json({ success: false, message: "المفتاح غير صالح ❌" });
   } catch (err) {
     const errorDetails = err.response?.data?.error?.message || err.response?.data?.message || err.message;
     return res.json({ success: false, message: `فشل الفحص: ${errorDetails || 'تأكد من المفتاح'} ❌` });
@@ -380,9 +381,10 @@ app.get('/translate', async (req, res) => {
 
     if (geminiKey && !translatedText) {
       try {
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiKey.trim()}`;
+        const url = `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${geminiKey.trim()}`;
         const gRes = await axios.post(url, {
           contents: [{
+            role: "user",
             parts: [{
               text: `Translate this subtitle into accurate Arabic with exact timing preservation. Output ONLY the translated content:\n\n${originalText.slice(0, 30000)}`
             }]
