@@ -429,22 +429,159 @@ app.get('/translate', async (req, res) => {
   }
 });
 
-// فك شفرة معرف الأنمي
-async function resolveAnimeMeta(rawId) {
-  try {
-    if (rawId.startsWith('kitsu:')) {
-      const parts = rawId.split(':');
-      const kitsuId = parts[1];
-      const ep = parts[2] || '1';
-      const res = await axios.get(`https://kitsu.io/api/edge/anime/${kitsuId}`, { timeout: 5000 }).catch((e) => { logErr('kitsu:meta', e); return null; });
-      const title = res?.data?.data?.attributes?.canonicalTitle || res?.data?.data?.attributes?.titles?.en;
+// ============= تحويل معرفات الأنمي (kitsu / mal / anilist / tmdb / tvdb) بشكل ثنائي الاتجاه =============
+//
+// الفكرة: بعض مصادر الترجمة تُفهرس حلقات الأنمي بالترقيم المطلق (مثال: هنتر × هنتر
+// الحلقة 111 كما في kitsu/mal/anilist)، بينما مصادر أخرى (OpenSubtitles, SubDL, IMDB)
+// تُفهرس بترقيم الموسم/الحلقة القياسي لـ TVDB/TMDB (مثال: نفس الحلقة = الموسم 2 الحلقة 53).
+// نستخدم قاعدة بيانات Fribb/anime-lists التي تحتوي على "season" و "episode_offset"
+// لكل عمل، لنحوّل تلقائيًا بين الترقيمين ونبحث بكليهما معًا.
 
-      const stremRes = await axios.get(`https://anime-kitsu.strem.fun/meta/anime/kitsu:${kitsuId}.json`, { timeout: 5000 }).catch((e) => { logErr('kitsu:strem', e); return null; });
-      const imdbId = stremRes?.data?.meta?.imdb_id ? `${stremRes.data.meta.imdb_id}:1:${ep}` : null;
-      return { imdbId, title, ep };
+let animeListCache = null;
+let animeListCacheTime = 0;
+async function getAnimeListMap() {
+  const now = Date.now();
+  if (animeListCache && now - animeListCacheTime < 24 * 3600 * 1000) return animeListCache;
+  try {
+    const r = await axios.get('https://raw.githubusercontent.com/Fribb/anime-lists/master/anime-list-full.json', { timeout: 20000 });
+    if (Array.isArray(r.data)) {
+      animeListCache = r.data;
+      animeListCacheTime = now;
+      console.log(`[animeListMap] تم تحميل ${animeListCache.length} عنصر`);
+    }
+    return animeListCache || [];
+  } catch (e) {
+    logErr('animeListMap:fetch', e);
+    return animeListCache || [];
+  }
+}
+
+function firstImdb(entry) {
+  if (!entry?.imdb_id) return null;
+  return Array.isArray(entry.imdb_id) ? entry.imdb_id[0] : String(entry.imdb_id).split(',')[0].trim();
+}
+
+// يحوّل معرف TMDB إلى IMDB عبر TMDB API (يحتاج مفتاح TMDB)
+async function tmdbToImdb(tmdbId, mediaType, tmdbKey) {
+  try {
+    const r = await axios.get(`https://api.themoviedb.org/3/${mediaType}/${tmdbId}/external_ids?api_key=${encodeURIComponent(tmdbKey)}`, { timeout: 6000 });
+    return r.data?.imdb_id || null;
+  } catch (e) {
+    logErr('tmdb:external_ids', e);
+    return null;
+  }
+}
+
+async function tvdbToTmdb(tvdbId, tmdbKey) {
+  try {
+    const r = await axios.get(`https://api.themoviedb.org/3/find/${tvdbId}?api_key=${encodeURIComponent(tmdbKey)}&external_source=tvdb_id`, { timeout: 6000 });
+    return { tvId: r.data?.tv_results?.[0]?.id || null, movieId: r.data?.movie_results?.[0]?.id || null };
+  } catch (e) {
+    logErr('tvdb:find', e);
+    return { tvId: null, movieId: null };
+  }
+}
+
+// نقطة الدخول العامة لأي معرف (tt/kitsu/mal/anilist/tmdb/tvdb)
+// تُرجع: { imdbId, season, episode, kitsuId, absoluteEp, title }
+// imdbId يُستخدم للمصادر المبنية على IMDB (OpenSubtitles/SubDL/الأغلبية)
+// kitsuId + absoluteEp يُستخدمان لمصادر الأنمي المتخصصة (التي تفهرس بالترقيم المطلق)
+async function resolveExternalId(rawId, tmdbKey) {
+  try {
+    const parts = rawId.split(':');
+    const prefix = parts[0];
+
+    // ---- كيتسو / مايال / أنيليست: الترقيم مطلق أصلاً ----
+    if (prefix === 'kitsu' || prefix === 'mal' || prefix === 'anilist') {
+      const externalId = parts[1];
+      const absoluteEp = parts[2] ? parseInt(parts[2]) : 1;
+      const map = await getAnimeListMap();
+
+      const fieldMap = { kitsu: 'kitsu_id', mal: 'mal_id', anilist: 'anilist_id' };
+      const field = fieldMap[prefix];
+      const entry = map.find(e => String(e[field]) === String(externalId));
+
+      let title = null;
+      if (prefix === 'kitsu') {
+        const res = await axios.get(`https://kitsu.io/api/edge/anime/${externalId}`, { timeout: 5000 }).catch(() => null);
+        title = res?.data?.data?.attributes?.canonicalTitle || res?.data?.data?.attributes?.titles?.en;
+      }
+
+      if (!entry) return { imdbId: null, kitsuId: entry?.kitsu_id || (prefix === 'kitsu' ? externalId : null), absoluteEp, title };
+
+      const kitsuId = entry.kitsu_id || (prefix === 'kitsu' ? externalId : null);
+
+      // احسب رقم الموسم والحلقة على طريقة TVDB باستخدام الإزاحة (episode_offset)
+      const tvdbSeason = entry.season?.tvdb ?? 1;
+      const tvdbOffset = entry.episode_offset?.tvdb ?? 0;
+      const season = tvdbSeason || 1;
+      const episode = absoluteEp + tvdbOffset;
+
+      let imdbId = firstImdb(entry);
+      if (!imdbId && entry.themoviedb_id?.tv && tmdbKey) {
+        imdbId = await tmdbToImdb(entry.themoviedb_id.tv, 'tv', tmdbKey);
+      }
+
+      return {
+        imdbId: imdbId ? `${imdbId}:${season}:${episode}` : null,
+        kitsuId,
+        absoluteEp,
+        title
+      };
+    }
+
+    // ---- TMDB أو TVDB: الترقيم غالبًا موسم/حلقة قياسي ----
+    if (prefix === 'tmdb' || prefix === 'tvdb') {
+      const externalId = parts[1];
+      const season = parts[2] ? parseInt(parts[2]) : null;
+      const episode = parts[3] ? parseInt(parts[3]) : null;
+
+      // ابحث في قاعدة بيانات الأنمي أولاً لمعرفة إن كان العمل أنمي، ولإيجاد معرف kitsu المطابق
+      const map = await getAnimeListMap();
+      const idField = prefix === 'tmdb' ? null : 'tvdb_id';
+      let entry = null;
+
+      if (prefix === 'tvdb') {
+        entry = map.find(e => String(e.tvdb_id) === String(externalId) && (season == null || (e.season?.tvdb ?? 1) === season));
+        if (!entry) entry = map.find(e => String(e.tvdb_id) === String(externalId));
+      } else {
+        entry = map.find(e => String(e.themoviedb_id?.tv) === String(externalId) && (season == null || (e.season?.tmdb ?? 1) === season));
+        if (!entry) entry = map.find(e => String(e.themoviedb_id?.tv) === String(externalId));
+      }
+
+      let imdbId = entry ? firstImdb(entry) : null;
+      let kitsuId = entry?.kitsu_id || null;
+      let absoluteEp = null;
+
+      if (entry && season != null && episode != null) {
+        const offsetKey = prefix === 'tvdb' ? 'tvdb' : 'tmdb';
+        const offset = entry.episode_offset?.[offsetKey] ?? 0;
+        absoluteEp = episode - offset;
+        if (absoluteEp < 1) absoluteEp = null; // إزاحة غير منطقية، تجاهلها
+      }
+
+      // إن لم نجد IMDB من قاعدة الأنمي، حاول عبر TMDB API مباشرة (يعمل للأنمي وغير الأنمي)
+      if (!imdbId && tmdbKey) {
+        if (prefix === 'tmdb') {
+          const mediaType = season != null ? 'tv' : 'movie';
+          imdbId = await tmdbToImdb(externalId, mediaType, tmdbKey);
+        } else {
+          const { tvId, movieId } = await tvdbToTmdb(externalId, tmdbKey);
+          if (tvId) imdbId = await tmdbToImdb(tvId, 'tv', tmdbKey);
+          else if (movieId) imdbId = await tmdbToImdb(movieId, 'movie', tmdbKey);
+        }
+      }
+
+      if (!imdbId) return kitsuId ? { imdbId: null, kitsuId, absoluteEp } : null;
+
+      return {
+        imdbId: season != null ? `${imdbId}:${season}:${episode || 1}` : imdbId,
+        kitsuId,
+        absoluteEp
+      };
     }
   } catch (e) {
-    logErr('resolveAnimeMeta', e);
+    logErr('resolveExternalId', e);
   }
   return null;
 }
@@ -534,7 +671,7 @@ const handleSubtitles = async (req, res) => {
 
   let limit = 40;
   let geminiKey = '', groqKey = '', deeplKey = '', openaiKey = '';
-  let subsourceKey = '', openSubKey = '', subdlKey = '', wyzieKey = '';
+  let subsourceKey = '', openSubKey = '', subdlKey = '', wyzieKey = '', tmdbKey = '';
   let prefFormat = 'ass';
 
   if (req.params.config) {
@@ -549,6 +686,7 @@ const handleSubtitles = async (req, res) => {
       if (p.openSubKey) openSubKey = p.openSubKey;
       if (p.subdlKey) subdlKey = p.subdlKey;
       if (p.wyzieKey) wyzieKey = p.wyzieKey;
+      if (p.tmdbKey) tmdbKey = p.tmdbKey;
       if (p.format) prefFormat = p.format;
     } catch (e) {
       logErr('config:decode', e);
@@ -563,10 +701,27 @@ const handleSubtitles = async (req, res) => {
   const targetIds = [targetId];
   let animeInfo = null;
 
-  if (targetId.startsWith('kitsu:')) {
-    animeInfo = await resolveAnimeMeta(targetId);
-    if (animeInfo?.imdbId) targetIds.push(animeInfo.imdbId);
+  const idPrefix = targetId.split(':')[0];
+  if (['kitsu', 'mal', 'anilist', 'tmdb', 'tvdb'].includes(idPrefix)) {
+    animeInfo = await resolveExternalId(targetId, tmdbKey);
+
+    // 1) أضف المعرف المكافئ بصيغة IMDB (موسم/حلقة قياسي) - يخدم OpenSubtitles/SubDL/الأغلبية
+    if (animeInfo?.imdbId) {
+      targetIds.push(animeInfo.imdbId);
+    } else {
+      console.log(`[resolve] تعذر تحويل المعرف ${targetId} إلى IMDB${['tmdb', 'tvdb'].includes(idPrefix) && !tmdbKey ? ' (مفتاح TMDB غير مُدخل في الإعدادات)' : ''}`);
+    }
+
+    // 2) أضف المعرف المكافئ بصيغة kitsu + رقم حلقة مطلق - يخدم مصادر الأنمي المتخصصة
+    //    (تُفهرس عادة بالترقيم المطلق بغض النظر عن الموسم الرسمي على TVDB)
+    if (animeInfo?.kitsuId && animeInfo?.absoluteEp && idPrefix !== 'kitsu') {
+      const kitsuEquivalent = `kitsu:${animeInfo.kitsuId}:${animeInfo.absoluteEp}`;
+      if (!targetIds.includes(kitsuEquivalent)) targetIds.push(kitsuEquivalent);
+    }
   }
+
+  console.log(`[targetIds] ${targetId} -> [${targetIds.join(', ')}]`);
+
 
   const requests = [];
 
@@ -596,7 +751,7 @@ const handleSubtitles = async (req, res) => {
     );
 
     // مصادر الأنمي
-    if (tid.startsWith('kitsu') || tid.startsWith('anilist') || fetchType === 'series') {
+    if (tid.startsWith('kitsu') || tid.startsWith('anilist') || tid.startsWith('mal') || fetchType === 'series') {
       requests.push(
         axios.get(`https://anime-subtitles.strem.fun/subtitles/series/${tid}.json`, { headers: clientHeaders, timeout: 6000 })
           .then(r => r.data?.subtitles || []).catch(e => { logErr('mirror:anime-subs', e); return []; }),
