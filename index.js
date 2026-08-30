@@ -4,6 +4,7 @@ const axios = require('axios');
 const AdmZip = require('adm-zip');
 
 const app = express();
+app.set('trust proxy', true); // مهم عند العمل خلف بروكسي (Render/Heroku/إلخ) ليعطي req.protocol القيمة الصحيحة https
 app.use(cors());
 app.use(express.json());
 
@@ -375,19 +376,35 @@ app.get(['/manifest.json', '/:config/manifest.json'], (req, res) => {
 });
 
 // مسار الترجمة الفورية بالذكاء الاصطناعي
-app.get('/translate', async (req, res) => {
+// يقبل أيضًا /translate/trans.srt أو /translate/trans.ass (نفس المنطق، فقط لتمييز الرابط بصريًا باسم "trans")
+app.get(['/translate', '/translate/:label'], async (req, res) => {
   const { subUrl, geminiKey, groqKey, deeplKey, openaiKey, format } = req.query;
   if (!subUrl) return res.status(400).send("No subtitle URL");
 
+  const reqId = Math.random().toString(36).slice(2, 8);
+  const t0 = Date.now();
+  const elapsed = () => `${((Date.now() - t0) / 1000).toFixed(1)}s`;
+
+  console.log(`[translate:${reqId}] بدء الطلب | gemini=${!!geminiKey} groq=${!!groqKey} deepl=${!!deeplKey} openai=${!!openaiKey} | src=${subUrl.slice(0, 90)}`);
+
   try {
-    const subRes = await axios.get(subUrl, { responseType: 'text', timeout: 10000 });
+    const fetchStart = Date.now();
+    const subRes = await axios.get(subUrl, { responseType: 'text', timeout: 15000 });
     const originalText = subRes.data;
+    console.log(`[translate:${reqId}] تم جلب الملف الأصلي خلال ${((Date.now() - fetchStart) / 1000).toFixed(1)}s (${originalText?.length || 0} حرف)`);
+
+    if (!originalText || typeof originalText !== 'string' || originalText.trim().length === 0) {
+      console.log(`[translate:${reqId}] الملف الأصلي فارغ، إرسال المصدر كما هو`);
+      res.setHeader('Content-Type', format === 'ass' ? 'text/x-ssa; charset=utf-8' : 'text/plain; charset=utf-8');
+      return res.redirect(subUrl);
+    }
 
     let translatedText = null;
 
     if (geminiKey && !translatedText) {
       const modelsToTry = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-pro'];
       for (const m of modelsToTry) {
+        const mStart = Date.now();
         try {
           const url = `https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${encodeURIComponent(geminiKey.trim())}`;
           const gRes = await axios.post(url, {
@@ -396,16 +413,19 @@ app.get('/translate', async (req, res) => {
                 text: `Translate this subtitle into accurate Arabic with exact timing preservation. Output ONLY the translated content:\n\n${originalText.slice(0, 30000)}`
               }]
             }]
-          }, { headers: { 'Content-Type': 'application/json' }, timeout: 15000 });
+          }, { headers: { 'Content-Type': 'application/json' }, timeout: 25000 });
           translatedText = gRes.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+          console.log(`[translate:${reqId}] Gemini(${m}) ${translatedText ? 'نجح' : 'رجع بدون نص'} خلال ${((Date.now() - mStart) / 1000).toFixed(1)}s`);
           if (translatedText) break;
         } catch (e) {
+          console.log(`[translate:${reqId}] Gemini(${m}) فشل خلال ${((Date.now() - mStart) / 1000).toFixed(1)}s`);
           logErr(`translate:gemini:${m}`, e);
         }
       }
     }
 
     if (groqKey && !translatedText) {
+      const gStart = Date.now();
       try {
         const groqRes = await axios.post('https://api.groq.com/openai/v1/chat/completions', {
           model: 'llama-3.3-70b-versatile',
@@ -413,14 +433,54 @@ app.get('/translate', async (req, res) => {
             role: 'user',
             content: `Translate this subtitle into accurate Arabic with exact timing preservation. Output ONLY the raw subtitle content without explanation:\n\n${originalText.slice(0, 30000)}`
           }]
-        }, { headers: { Authorization: `Bearer ${groqKey.trim()}` }, timeout: 15000 });
+        }, { headers: { Authorization: `Bearer ${groqKey.trim()}` }, timeout: 25000 });
         translatedText = groqRes.data?.choices?.[0]?.message?.content;
+        console.log(`[translate:${reqId}] Groq ${translatedText ? 'نجح' : 'رجع بدون نص'} خلال ${((Date.now() - gStart) / 1000).toFixed(1)}s`);
       } catch (e) {
+        console.log(`[translate:${reqId}] Groq فشل خلال ${((Date.now() - gStart) / 1000).toFixed(1)}s`);
         logErr('translate:groq', e);
       }
     }
 
+    if (deeplKey && !translatedText) {
+      const dStart = Date.now();
+      try {
+        const isFree = deeplKey.trim().endsWith(':fx');
+        const dUrl = isFree ? 'https://api-free.deepl.com/v2/translate' : 'https://api.deepl.com/v2/translate';
+        const dRes = await axios.post(dUrl, {
+          text: [originalText.slice(0, 30000)],
+          target_lang: 'AR',
+          preserve_formatting: true
+        }, { headers: { Authorization: `DeepL-Auth-Key ${deeplKey.trim()}`, 'Content-Type': 'application/json' }, timeout: 25000 });
+        translatedText = dRes.data?.translations?.[0]?.text;
+        console.log(`[translate:${reqId}] DeepL ${translatedText ? 'نجح' : 'رجع بدون نص'} خلال ${((Date.now() - dStart) / 1000).toFixed(1)}s`);
+      } catch (e) {
+        console.log(`[translate:${reqId}] DeepL فشل خلال ${((Date.now() - dStart) / 1000).toFixed(1)}s`);
+        logErr('translate:deepl', e);
+      }
+    }
+
+    if (openaiKey && !translatedText) {
+      const oStart = Date.now();
+      try {
+        const oRes = await axios.post('https://api.openai.com/v1/chat/completions', {
+          model: 'gpt-4o-mini',
+          messages: [{
+            role: 'user',
+            content: `Translate this subtitle into accurate Arabic with exact timing preservation. Output ONLY the raw subtitle content without explanation:\n\n${originalText.slice(0, 30000)}`
+          }]
+        }, { headers: { Authorization: `Bearer ${openaiKey.trim()}`, 'Content-Type': 'application/json' }, timeout: 25000 });
+        translatedText = oRes.data?.choices?.[0]?.message?.content;
+        console.log(`[translate:${reqId}] OpenAI ${translatedText ? 'نجح' : 'رجع بدون نص'} خلال ${((Date.now() - oStart) / 1000).toFixed(1)}s`);
+      } catch (e) {
+        console.log(`[translate:${reqId}] OpenAI فشل خلال ${((Date.now() - oStart) / 1000).toFixed(1)}s`);
+        logErr('translate:openai', e);
+      }
+    }
+
     const finalResult = translatedText || originalText;
+    console.log(`[translate:${reqId}] ${translatedText ? 'تمت الترجمة' : 'تعذرت الترجمة، إرسال النص الأصلي'} | إجمالي الوقت: ${elapsed()}`);
+
     res.setHeader('Content-Type', format === 'ass' ? 'text/x-ssa; charset=utf-8' : 'text/plain; charset=utf-8');
     res.send(finalResult);
   } catch (err) {
@@ -848,26 +908,36 @@ const handleSubtitles = async (req, res) => {
       });
     }
 
-    let combinedSubs = [...arabicSubs, ...nonArabicSubs];
-
     console.log(`[subtitles] ${type}/${targetId} -> عربي: ${arabicSubs.length}, أجنبي: ${nonArabicSubs.length}`);
 
-    // إضافة ترجمات الذكاء الاصطناعي (حتى 5 نتائج) في نهاية القائمة
+    // إضافة ترجمات الذكاء الاصطناعي (حتى 5 نتائج) - تُبنى بشكل منفصل لضمان عدم حذفها
+    // لاحقًا عند تقليم القائمة حسب الحد الأقصى (limit)
     const hasAiKey = geminiKey || groqKey || deeplKey || openaiKey;
+    const aiSubs = [];
     if (nonArabicSubs.length > 0 && hasAiKey) {
       const candidates = nonArabicSubs.slice(0, 5);
+      const ext = prefFormat === 'ass' ? 'ass' : 'srt';
       candidates.forEach((cand, idx) => {
-        const aiProxyUrl = `${protocol}://${host}/translate?subUrl=${encodeURIComponent(cand.url)}&geminiKey=${encodeURIComponent(geminiKey)}&groqKey=${encodeURIComponent(groqKey)}&deeplKey=${encodeURIComponent(deeplKey)}&openaiKey=${encodeURIComponent(openaiKey)}&format=${encodeURIComponent(prefFormat)}`;
+        // اسم الرابط يحتوي على "trans" عمدًا لتمييز الترجمة المُحوّلة بالذكاء الاصطناعي
+        // عن الترجمات الجاهزة الأصلية عند عرضها داخل Nuvio
+        const aiProxyUrl = `${protocol}://${host}/translate/trans.${ext}?subUrl=${encodeURIComponent(cand.url)}&geminiKey=${encodeURIComponent(geminiKey)}&groqKey=${encodeURIComponent(groqKey)}&deeplKey=${encodeURIComponent(deeplKey)}&openaiKey=${encodeURIComponent(openaiKey)}&format=${encodeURIComponent(prefFormat)}`;
 
-        combinedSubs.push({
-          id: `ai_sub_${idx + 1}`,
+        aiSubs.push({
+          id: `trans_${idx + 1}`,
           url: aiProxyUrl,
           lang: 'ara'
         });
       });
+      console.log(`[subtitles] ${type}/${targetId} -> تمت إضافة ${aiSubs.length} رابط ترجمة AI (trans)`);
     }
 
-    return res.json({ subtitles: combinedSubs.slice(0, limit) });
+    // نضمن بقاء ترجمات AI ضمن النتيجة النهائية دائمًا: نقصّ الترجمات العادية فقط
+    // لإفساح المجال، ثم نُلحق ترجمات AI في النهاية بدون أي تقليم إضافي عليها
+    const regularSubs = [...arabicSubs, ...nonArabicSubs];
+    const regularLimit = Math.max(0, limit - aiSubs.length);
+    const combinedSubs = [...regularSubs.slice(0, regularLimit), ...aiSubs];
+
+    return res.json({ subtitles: combinedSubs });
   } catch (error) {
     logErr('handleSubtitles:main', error);
     return res.json({ subtitles: [] });
