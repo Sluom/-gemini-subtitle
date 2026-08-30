@@ -8,7 +8,7 @@ app.use(express.json());
 
 const manifest = {
   id: "org.nuvio.universal.mega.subtitles",
-  version: "17.0.0",
+  version: "18.0.0",
   name: "Universal Mega Subtitles Hub & AI",
   description: "جلب الترجمات الشاملة (OpenSubtitles, SubDL, SubSource, AnimeTosho, Jimaku, Wyzie) مع دعم Gemini/Groq/DeepL",
   resources: [
@@ -23,31 +23,36 @@ const manifest = {
   catalogs: []
 };
 
-// مسار فحص وتجربة المفاتيح الدقيق (Fixed Test Key)
+// مسار فحص وتجربة المفاتيح المحسن والمصحح
 app.post('/test-key', async (req, res) => {
   const { provider, key } = req.body;
   if (!key) return res.json({ success: false, message: "يرجى إدخال المفتاح أولاً ⚠️" });
 
+  const cleanKey = key.trim();
+
   try {
-    // 1. فحص Gemini عبر REST API المباشر
+    // 1. فحص Gemini
     if (provider === 'gemini') {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${key}`;
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${cleanKey}`;
       const r = await axios.post(url, {
-        contents: [{ parts: [{ text: "hi" }] }]
-      }, { timeout: 6000 });
-      if (r.status === 200) return res.json({ success: true, message: "مفتاح Gemini صالح وشغال 100% ✅" });
+        contents: [{ role: "user", parts: [{ text: "Hello" }] }]
+      }, { headers: { 'Content-Type': 'application/json' }, timeout: 7000 });
+      if (r.status === 200 && r.data?.candidates) {
+        return res.json({ success: true, message: "مفتاح Gemini صالح وشغال 100% ✅" });
+      }
     }
 
     // 2. فحص OpenSubtitles.com
     if (provider === 'opensub') {
       const r = await axios.get('https://api.opensubtitles.com/api/v1/infos/user', {
         headers: {
-          'Api-Key': key,
-          'User-Agent': 'NuvioSubtitlesApp v1.0'
+          'Api-Key': cleanKey,
+          'User-Agent': 'NuvioSubtitlesApp v1.0.0',
+          'Accept': 'application/json'
         },
-        timeout: 6000
+        timeout: 7000
       });
-      if (r.status === 200 || r.data?.user_id) {
+      if (r.status === 200 || r.data?.user_id || r.data?.data) {
         return res.json({ success: true, message: "مفتاح OpenSubtitles صالح وشغال 100% ✅" });
       }
     }
@@ -55,8 +60,8 @@ app.post('/test-key', async (req, res) => {
     // 3. فحص SubSource
     if (provider === 'subsource') {
       const r = await axios.get('https://api.subsource.net/api/v1/subtitles?imdb=tt1375666&lang=ar', {
-        headers: { 'x-api-key': key },
-        timeout: 6000
+        headers: { 'X-API-Key': cleanKey, 'Accept': 'application/json' },
+        timeout: 7000
       }).catch(e => e.response);
       if (r && (r.status === 200 || r.status === 404)) {
         return res.json({ success: true, message: "مفتاح SubSource صالح وشغال 100% ✅" });
@@ -66,7 +71,7 @@ app.post('/test-key', async (req, res) => {
     // 4. فحص Groq
     if (provider === 'groq') {
       const r = await axios.get('https://api.groq.com/openai/v1/models', {
-        headers: { Authorization: `Bearer ${key}` },
+        headers: { Authorization: `Bearer ${cleanKey}` },
         timeout: 5000
       });
       if (r.status === 200) return res.json({ success: true, message: "مفتاح Groq صالح 100% ✅" });
@@ -74,16 +79,16 @@ app.post('/test-key', async (req, res) => {
 
     // 5. فحص DeepL
     if (provider === 'deepl') {
-      const isFree = key.endsWith(':fx');
+      const isFree = cleanKey.endsWith(':fx');
       const url = isFree ? 'https://api-free.deepl.com/v2/usage' : 'https://api.deepl.com/v2/usage';
-      const r = await axios.get(url, { headers: { Authorization: `DeepL-Auth-Key ${key}` }, timeout: 5000 });
+      const r = await axios.get(url, { headers: { Authorization: `DeepL-Auth-Key ${cleanKey}` }, timeout: 5000 });
       if (r.status === 200) return res.json({ success: true, message: "مفتاح DeepL صالح 100% ✅" });
     }
 
     // 6. فحص OpenAI
     if (provider === 'openai') {
       const r = await axios.get('https://api.openai.com/v1/models', {
-        headers: { Authorization: `Bearer ${key}` },
+        headers: { Authorization: `Bearer ${cleanKey}` },
         timeout: 5000
       });
       if (r.status === 200) return res.json({ success: true, message: "مفتاح OpenAI صالح 100% ✅" });
@@ -91,7 +96,7 @@ app.post('/test-key', async (req, res) => {
 
     // 7. فحص SubDL
     if (provider === 'subdl') {
-      const r = await axios.get(`https://api.subdl.com/api/v1/subtitles?api_key=${key}&film_name=Inception`, { timeout: 5000 });
+      const r = await axios.get(`https://api.subdl.com/api/v1/subtitles?api_key=${cleanKey}&film_name=Inception`, { timeout: 5000 });
       if (r.data?.status === true || r.data?.results) return res.json({ success: true, message: "مفتاح SubDL صالح 100% ✅" });
     }
 
@@ -102,7 +107,7 @@ app.post('/test-key', async (req, res) => {
 
     // 9. فحص TMDB
     if (provider === 'tmdb') {
-      const r = await axios.get(`https://api.themoviedb.org/3/movie/550?api_key=${key}`, { timeout: 5000 });
+      const r = await axios.get(`https://api.themoviedb.org/3/movie/550?api_key=${cleanKey}`, { timeout: 5000 });
       if (r.data?.id) return res.json({ success: true, message: "مفتاح TMDB صالح 100% ✅" });
     }
 
@@ -113,11 +118,12 @@ app.post('/test-key', async (req, res) => {
 
     return res.json({ success: false, message: "المفتاح غير صالح أو انتهت صلاحيته ❌" });
   } catch (err) {
-    return res.json({ success: false, message: "فشل الفحص: تأكد من صحة المفتاح ❌" });
+    const errorDetails = err.response?.data?.error?.message || err.response?.data?.message || err.message;
+    return res.json({ success: false, message: `فشل الفحص: ${errorDetails || 'تأكد من المفتاح'} ❌` });
   }
 });
 
-// واجهة التخصيص الكاملة
+// واجهة التخصيص
 app.get(['/', '/configure'], (req, res) => {
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.send(`
@@ -361,7 +367,7 @@ app.get(['/manifest.json', '/:config/manifest.json'], (req, res) => {
   res.json(manifest);
 });
 
-// محرك الترجمة الفورية عبر الذكاء الاصطناعي
+// مسار الترجمة الفورية عبر الذكاء الاصطناعي
 app.get('/translate', async (req, res) => {
   const { subUrl, geminiKey, groqKey, deeplKey, openaiKey, format } = req.query;
   if (!subUrl) return res.status(400).send("No subtitle URL");
@@ -374,14 +380,14 @@ app.get('/translate', async (req, res) => {
 
     if (geminiKey && !translatedText) {
       try {
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiKey}`;
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiKey.trim()}`;
         const gRes = await axios.post(url, {
           contents: [{
             parts: [{
               text: `Translate this subtitle into accurate Arabic with exact timing preservation. Output ONLY the translated content:\n\n${originalText.slice(0, 30000)}`
             }]
           }]
-        }, { timeout: 8000 });
+        }, { headers: { 'Content-Type': 'application/json' }, timeout: 8000 });
         translatedText = gRes.data?.candidates?.[0]?.content?.parts?.[0]?.text;
       } catch (e) {}
     }
@@ -394,7 +400,7 @@ app.get('/translate', async (req, res) => {
             role: 'user',
             content: `Translate this subtitle into accurate Arabic with exact timing preservation. Output ONLY the raw subtitle content without explanation:\n\n${originalText.slice(0, 30000)}`
           }]
-        }, { headers: { Authorization: `Bearer ${groqKey}` }, timeout: 8000 });
+        }, { headers: { Authorization: `Bearer ${groqKey.trim()}` }, timeout: 8000 });
         translatedText = groqRes.data?.choices?.[0]?.message?.content;
       } catch (e) {}
     }
@@ -425,7 +431,7 @@ async function resolveAnimeMeta(rawId) {
   return null;
 }
 
-// معالج جلب الترجمات الشامل لكافة المواقع
+// معالج جلب الترجمات الشامل
 const handleSubtitles = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Content-Type', 'application/json');
@@ -483,7 +489,7 @@ const handleSubtitles = async (req, res) => {
     if (openSubKey && tid.startsWith('tt')) {
       requests.push(
         axios.get(`https://api.opensubtitles.com/api/v1/subtitles?imdb_id=${tid.replace('tt', '')}&languages=ar,en`, {
-          headers: { 'Api-Key': openSubKey, 'User-Agent': 'NuvioSubtitlesApp v1.0' },
+          headers: { 'Api-Key': openSubKey.trim(), 'User-Agent': 'NuvioSubtitlesApp v1.0.0' },
           timeout: 4500
         }).then(r => (r.data?.data || []).map(s => ({
           id: `opensub_${s.id}`,
@@ -504,7 +510,7 @@ const handleSubtitles = async (req, res) => {
     if (subsourceKey && tid.startsWith('tt')) {
       requests.push(
         axios.get(`https://api.subsource.net/api/v1/subtitles?imdb=${tid}&lang=ar,en`, {
-          headers: { 'x-api-key': subsourceKey },
+          headers: { 'X-API-Key': subsourceKey.trim() },
           timeout: 4500
         }).then(r => (r.data?.subtitles || []).map(s => ({
           id: `subsource_${s.id}`,
@@ -517,7 +523,7 @@ const handleSubtitles = async (req, res) => {
     // 3. SubDL API & Mirrors
     if (subdlKey && tid.startsWith('tt')) {
       requests.push(
-        axios.get(`https://api.subdl.com/api/v1/subtitles?api_key=${subdlKey}&imdb_id=${tid}&languages=ar,en`, { timeout: 4500 })
+        axios.get(`https://api.subdl.com/api/v1/subtitles?api_key=${subdlKey.trim()}&imdb_id=${tid}&languages=ar,en`, { timeout: 4500 })
           .then(r => (r.data?.subtitles || []).map(s => ({
             id: `subdl_${s.id}`,
             url: `https://dl.subdl.com${s.url}`,
@@ -534,7 +540,7 @@ const handleSubtitles = async (req, res) => {
     // 4. Wyzie Subs
     if (wyzieKey && tid.startsWith('tt')) {
       requests.push(
-        axios.get(`https://wyzie.ru/api/v1/subtitles/${fetchType}/${tid}.json?api_key=${wyzieKey}`, { timeout: 4000 })
+        axios.get(`https://wyzie.ru/api/v1/subtitles/${fetchType}/${tid}.json?api_key=${wyzieKey.trim()}`, { timeout: 4000 })
           .then(r => r.data?.subtitles || []).catch(() => [])
       );
     }
