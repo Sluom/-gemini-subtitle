@@ -8,7 +8,7 @@ app.use(express.json());
 
 const manifest = {
   id: "org.nuvio.universal.mega.subtitles",
-  version: "19.0.0",
+  version: "20.0.0",
   name: "Universal Mega Subtitles Hub & AI",
   description: "جلب الترجمات الشاملة (OpenSubtitles, SubDL, SubSource, AnimeTosho, Jimaku, Wyzie) مع دعم Gemini/Groq/DeepL",
   resources: [
@@ -31,18 +31,16 @@ app.post('/test-key', async (req, res) => {
   const cleanKey = key.trim();
 
   try {
-    // 1. فحص Gemini بالإصدار المستقر والرسمي v1
+    // 1. فحص Gemini المباشر الخالي من أخطاء أسماء النماذج
     if (provider === 'gemini') {
-      const url = `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${cleanKey}`;
-      const r = await axios.post(url, {
-        contents: [{ role: "user", parts: [{ text: "Hello" }] }]
-      }, { headers: { 'Content-Type': 'application/json' }, timeout: 7000 });
-      if (r.status === 200 && r.data?.candidates) {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${cleanKey}`;
+      const r = await axios.get(url, { timeout: 7000 });
+      if (r.status === 200 && r.data?.models) {
         return res.json({ success: true, message: "مفتاح Gemini صالح وشغال 100% ✅" });
       }
     }
 
-    // 2. فحص OpenSubtitles.com عبر مسار البحث الخفيف
+    // 2. فحص OpenSubtitles.com
     if (provider === 'opensub') {
       const r = await axios.get('https://api.opensubtitles.com/api/v1/subtitles?query=Inception', {
         headers: {
@@ -379,21 +377,26 @@ app.get('/translate', async (req, res) => {
 
     let translatedText = null;
 
+    // 1. ترجمة Gemini مع التبديل التلقائي للنماذج المتاحة
     if (geminiKey && !translatedText) {
-      try {
-        const url = `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${geminiKey.trim()}`;
-        const gRes = await axios.post(url, {
-          contents: [{
-            role: "user",
-            parts: [{
-              text: `Translate this subtitle into accurate Arabic with exact timing preservation. Output ONLY the translated content:\n\n${originalText.slice(0, 30000)}`
+      const modelsToTry = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-pro'];
+      for (const m of modelsToTry) {
+        try {
+          const url = `https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${geminiKey.trim()}`;
+          const gRes = await axios.post(url, {
+            contents: [{
+              parts: [{
+                text: `Translate this subtitle into accurate Arabic with exact timing preservation. Output ONLY the translated content:\n\n${originalText.slice(0, 30000)}`
+              }]
             }]
-          }]
-        }, { headers: { 'Content-Type': 'application/json' }, timeout: 8000 });
-        translatedText = gRes.data?.candidates?.[0]?.content?.parts?.[0]?.text;
-      } catch (e) {}
+          }, { headers: { 'Content-Type': 'application/json' }, timeout: 8000 });
+          translatedText = gRes.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (translatedText) break;
+        } catch (e) {}
+      }
     }
 
+    // 2. Groq
     if (groqKey && !translatedText) {
       try {
         const groqRes = await axios.post('https://api.groq.com/openai/v1/chat/completions', {
@@ -433,7 +436,7 @@ async function resolveAnimeMeta(rawId) {
   return null;
 }
 
-// معالج جلب الترجمات الشامل
+// معالج جلب الترجمات الشامل لكافة المواقع
 const handleSubtitles = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Content-Type', 'application/json');
