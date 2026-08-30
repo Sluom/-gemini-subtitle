@@ -8,17 +8,17 @@ app.use(express.json());
 
 const manifest = {
   id: "org.nuvio.universal.opensubtitles.all",
-  version: "5.0.0",
+  version: "5.1.0",
   name: "Universal OpenSubtitles & Gemini AI",
-  description: "جلب كافة ترجمات OpenSubtitles بدون استثناء للأفلام والمسلسلات والأنمي مع دعم Gemini",
+  description: "جلب كافة ترجمات OpenSubtitles الشاملة للأفلام والمسلسلات والأنمي",
   resources: ["subtitles"],
   types: ["movie", "series", "anime", "other"],
-  idPrefixes: ["tt", "tmdb", "tvdb", "kitsu", "anilist", "mal"],
+  idPrefixes: ["tt", "kitsu", "tmdb", "tvdb", "anilist", "mal"],
   catalogs: []
 };
 
-// صفحة التخصيص والإعدادات الكاملة
-app.get('/', (req, res) => {
+// واجهة التخصيص
+app.get(['/', '/configure'], (req, res) => {
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.send(`
     <!DOCTYPE html>
@@ -76,16 +76,25 @@ app.get('/', (req, res) => {
   `);
 });
 
+// مسار المانيفست
 app.get(['/manifest.json', '/:config/manifest.json'], (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Content-Type', 'application/json');
-  res.send(manifest);
+  res.json(manifest);
 });
 
-// جلب كافة مصادر OpenSubtitles بدون أي فلترة أو استثناء
-app.all(['/subtitles/*', '/:config/subtitles/*'], async (req, res) => {
+// معالج جلب الترجمات المباشر
+const handleSubtitles = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Content-Type', 'application/json');
+
+  const { type, id, extra } = req.params;
+  let targetId = id;
+  if (extra && extra.endsWith('.json')) {
+    targetId = `${id}/${extra.replace('.json', '')}`;
+  } else if (targetId.endsWith('.json')) {
+    targetId = targetId.replace('.json', '');
+  }
 
   let limit = 100;
   if (req.params.config) {
@@ -95,45 +104,32 @@ app.all(['/subtitles/*', '/:config/subtitles/*'], async (req, res) => {
     } catch (e) {}
   }
 
-  const cleanPath = req.path.replace(/^\/[^/]+(?=\/subtitles)/, '');
-  const parts = cleanPath.replace('/subtitles/', '').replace('.json', '').split('/');
-  const type = parts[0] || 'movie';
-  const rawId = decodeURIComponent(parts[1] || '');
+  const clientHeaders = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'application/json'
+  };
 
-  if (!rawId) return res.json({ subtitles: [] });
-
-  let subtitles = [];
-  const requests = [];
-
-  // 1. خادم OpenSubtitles v3 الرئيسي
-  requests.push(
-    axios.get(`https://opensubtitles-v3.strem.io/subtitles/${type}/${rawId}.json`, { timeout: 4000 })
+  const requests = [
+    axios.get(`https://opensubtitles-v3.strem.io/subtitles/${type}/${targetId}.json`, { headers: clientHeaders, timeout: 5000 })
+      .then(r => r.data?.subtitles || []).catch(() => []),
+    axios.get(`https://opensubtitles.strem.fun/subtitles/${type}/${targetId}.json`, { headers: clientHeaders, timeout: 5000 })
       .then(r => r.data?.subtitles || []).catch(() => [])
-  );
+  ];
 
-  // 2. خوادم ترجمات الأنمي المفتوحة لمطابقة معرفات kitsu/anilist مع OpenSubtitles
-  if (rawId.startsWith('kitsu') || rawId.startsWith('anilist') || rawId.startsWith('mal')) {
+  if (targetId.startsWith('kitsu') || targetId.startsWith('anilist') || targetId.startsWith('mal')) {
     requests.push(
-      axios.get(`https://anime-subtitles.strem.fun/subtitles/${type}/${rawId}.json`, { timeout: 4000 })
-        .then(r => r.data?.subtitles || []).catch(() => [])
-    );
-  }
-
-  // 3. خوادم التحويل لمعرفات TMDB و TVDB إلى ترجمات OpenSubtitles المباشرة
-  if (rawId.startsWith('tmdb') || rawId.startsWith('tvdb')) {
-    requests.push(
-      axios.get(`https://subdl-stremio.vercel.app/subtitles/${type}/${rawId}.json`, { timeout: 4000 })
+      axios.get(`https://anime-subtitles.strem.fun/subtitles/${type}/${targetId}.json`, { headers: clientHeaders, timeout: 5000 })
         .then(r => r.data?.subtitles || []).catch(() => [])
     );
   }
 
   try {
     const results = await Promise.all(requests);
+    let subtitles = [];
     results.forEach(list => {
       if (Array.isArray(list)) subtitles.push(...list);
     });
 
-    // إزالة الروابط المكررة تماماً مع الإبقاء على كافة اللغات والنسخ
     const uniqueSubs = [];
     const seenUrls = new Set();
     for (const sub of subtitles) {
@@ -143,12 +139,17 @@ app.all(['/subtitles/*', '/:config/subtitles/*'], async (req, res) => {
       }
     }
 
-    // إرسال جميع الترجمات حسب الحد المختار
     return res.json({ subtitles: uniqueSubs.slice(0, limit) });
   } catch (error) {
     return res.json({ subtitles: [] });
   }
-});
+};
+
+// تسجيل جميع مسارات بروتوكول الترجمة لـ Nuvio و Stremio
+app.get('/subtitles/:type/:id.json', handleSubtitles);
+app.get('/subtitles/:type/:id/:extra.json', handleSubtitles);
+app.get('/:config/subtitles/:type/:id.json', handleSubtitles);
+app.get('/:config/subtitles/:type/:id/:extra.json', handleSubtitles);
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
