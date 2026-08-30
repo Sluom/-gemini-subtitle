@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
+const AdmZip = require('adm-zip');
 
 const app = express();
 app.use(cors());
@@ -8,7 +9,7 @@ app.use(express.json());
 
 const manifest = {
   id: "org.nuvio.universal.gemini.subtitles",
-  version: "26.0.0",
+  version: "26.1.0",
   name: "Universal Subtitles & Gemini AI",
   description: "جلب الترجمات الشاملة المباشرة للأفلام والمسلسلات والأنمي مع الترجمة الفورية عبر الذكاء الاصطناعي",
   resources: [
@@ -22,6 +23,32 @@ const manifest = {
   idPrefixes: ["tt", "kitsu", "tmdb", "tvdb", "anilist", "mal"],
   catalogs: []
 };
+
+// ============= أدوات مساعدة =============
+
+// base64url آمن للاستخدام داخل مسارات URL (بدون / أو + أو =)
+function base64UrlDecode(str) {
+  let s = str.replace(/-/g, '+').replace(/_/g, '/');
+  while (s.length % 4) s += '=';
+  return Buffer.from(s, 'base64').toString('utf8');
+}
+
+// يفكك معرف مثل tt1234567:1:5 إلى { imdbId, season, episode }
+function parseImdbId(rawId) {
+  const parts = rawId.split(':');
+  return {
+    imdbId: parts[0],
+    season: parts[1] ? parseInt(parts[1]) : null,
+    episode: parts[2] ? parseInt(parts[2]) : null
+  };
+}
+
+function logErr(label, err) {
+  const msg = err?.response?.status
+    ? `HTTP ${err.response.status} ${JSON.stringify(err.response.data).slice(0, 200)}`
+    : err?.message || err;
+  console.error(`[${label}] فشل:`, msg);
+}
 
 // مسار فحص وتجربة المفاتيح
 app.post('/test-key', async (req, res) => {
@@ -90,6 +117,7 @@ app.post('/test-key', async (req, res) => {
 
     return res.json({ success: false, message: "المفتاح غير صالح ❌" });
   } catch (err) {
+    logErr(`test-key:${provider}`, err);
     return res.json({ success: false, message: "فشل الفحص: تأكد من صحة المفتاح ❌" });
   }
 });
@@ -302,6 +330,14 @@ app.get(['/', '/configure'], (req, res) => {
           }
         }
 
+        // base64url: آمن داخل مسارات URL (يحل مشكلة اختفاء الترجمات بسبب / و + و =)
+        function toBase64Url(str) {
+          return btoa(str)
+            .replace(/\\+/g, '-')
+            .replace(/\\//g, '_')
+            .replace(/=+$/, '');
+        }
+
         function install() {
           const geminiKey = document.getElementById('geminiKey').value.trim();
           const groqKey = document.getElementById('groqKey').value.trim();
@@ -316,7 +352,7 @@ app.get(['/', '/configure'], (req, res) => {
           const limit = document.getElementById('subLimit').value;
           const format = document.getElementById('format').value;
 
-          const config = btoa(JSON.stringify({
+          const config = toBase64Url(JSON.stringify({
             geminiKey, groqKey, deeplKey, openaiKey, jimakuKey,
             subsourceKey, openSubKey, subdlKey, wyzieKey, tmdbKey,
             limit: parseInt(limit),
@@ -344,7 +380,7 @@ app.get('/translate', async (req, res) => {
   if (!subUrl) return res.status(400).send("No subtitle URL");
 
   try {
-    const subRes = await axios.get(subUrl, { responseType: 'text', timeout: 8000 });
+    const subRes = await axios.get(subUrl, { responseType: 'text', timeout: 10000 });
     const originalText = subRes.data;
 
     let translatedText = null;
@@ -353,17 +389,19 @@ app.get('/translate', async (req, res) => {
       const modelsToTry = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-pro'];
       for (const m of modelsToTry) {
         try {
-          const url = `https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${geminiKey.trim()}`;
+          const url = `https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${encodeURIComponent(geminiKey.trim())}`;
           const gRes = await axios.post(url, {
             contents: [{
               parts: [{
                 text: `Translate this subtitle into accurate Arabic with exact timing preservation. Output ONLY the translated content:\n\n${originalText.slice(0, 30000)}`
               }]
             }]
-          }, { headers: { 'Content-Type': 'application/json' }, timeout: 8000 });
+          }, { headers: { 'Content-Type': 'application/json' }, timeout: 15000 });
           translatedText = gRes.data?.candidates?.[0]?.content?.parts?.[0]?.text;
           if (translatedText) break;
-        } catch (e) {}
+        } catch (e) {
+          logErr(`translate:gemini:${m}`, e);
+        }
       }
     }
 
@@ -375,15 +413,18 @@ app.get('/translate', async (req, res) => {
             role: 'user',
             content: `Translate this subtitle into accurate Arabic with exact timing preservation. Output ONLY the raw subtitle content without explanation:\n\n${originalText.slice(0, 30000)}`
           }]
-        }, { headers: { Authorization: `Bearer ${groqKey.trim()}` }, timeout: 8000 });
+        }, { headers: { Authorization: `Bearer ${groqKey.trim()}` }, timeout: 15000 });
         translatedText = groqRes.data?.choices?.[0]?.message?.content;
-      } catch (e) {}
+      } catch (e) {
+        logErr('translate:groq', e);
+      }
     }
 
     const finalResult = translatedText || originalText;
     res.setHeader('Content-Type', format === 'ass' ? 'text/x-ssa; charset=utf-8' : 'text/plain; charset=utf-8');
     res.send(finalResult);
   } catch (err) {
+    logErr('translate:fetchSub', err);
     res.redirect(subUrl);
   }
 });
@@ -395,15 +436,85 @@ async function resolveAnimeMeta(rawId) {
       const parts = rawId.split(':');
       const kitsuId = parts[1];
       const ep = parts[2] || '1';
-      const res = await axios.get(`https://kitsu.io/api/edge/anime/${kitsuId}`, { timeout: 3500 }).catch(() => null);
+      const res = await axios.get(`https://kitsu.io/api/edge/anime/${kitsuId}`, { timeout: 5000 }).catch((e) => { logErr('kitsu:meta', e); return null; });
       const title = res?.data?.data?.attributes?.canonicalTitle || res?.data?.data?.attributes?.titles?.en;
-      
-      const stremRes = await axios.get(`https://anime-kitsu.strem.fun/meta/anime/kitsu:${kitsuId}.json`, { timeout: 3000 }).catch(() => null);
+
+      const stremRes = await axios.get(`https://anime-kitsu.strem.fun/meta/anime/kitsu:${kitsuId}.json`, { timeout: 5000 }).catch((e) => { logErr('kitsu:strem', e); return null; });
       const imdbId = stremRes?.data?.meta?.imdb_id ? `${stremRes.data.meta.imdb_id}:1:${ep}` : null;
       return { imdbId, title, ep };
     }
-  } catch (e) {}
+  } catch (e) {
+    logErr('resolveAnimeMeta', e);
+  }
   return null;
+}
+
+// جلب مباشر من OpenSubtitles.com الرسمي باستخدام مفتاح API الخاص بالمستخدم
+async function fetchOpenSubtitlesDirect(imdbId, season, episode, apiKey) {
+  if (!apiKey) return [];
+  try {
+    const cleanId = imdbId.replace('tt', '');
+    const params = new URLSearchParams({ imdb_id: cleanId, languages: 'ar,en' });
+    if (season) params.set('season_number', season);
+    if (episode) params.set('episode_number', episode);
+
+    const r = await axios.get(`https://api.opensubtitles.com/api/v1/subtitles?${params.toString()}`, {
+      headers: {
+        'Api-Key': apiKey.trim(),
+        'User-Agent': 'NuvioSubtitlesApp v1.0.0',
+        'Accept': 'application/json'
+      },
+      timeout: 8000
+    });
+
+    const items = r.data?.data || [];
+    const out = [];
+    for (const item of items) {
+      const attrs = item.attributes;
+      const fileUrl = attrs?.files?.[0]?.file_id;
+      if (!fileUrl) continue;
+      // نحتاج رابط تحميل فعلي عبر endpoint التحميل
+      try {
+        const dl = await axios.post('https://api.opensubtitles.com/api/v1/download',
+          { file_id: fileUrl },
+          { headers: { 'Api-Key': apiKey.trim(), 'Content-Type': 'application/json', 'User-Agent': 'NuvioSubtitlesApp v1.0.0' }, timeout: 8000 }
+        );
+        if (dl.data?.link) {
+          out.push({ url: dl.data.link, lang: attrs.language || 'en' });
+        }
+      } catch (e) {
+        logErr('opensubtitles:download', e);
+      }
+    }
+    return out;
+  } catch (e) {
+    logErr('opensubtitles:direct', e);
+    return [];
+  }
+}
+
+// جلب مباشر من SubDL باستخدام مفتاح API الخاص بالمستخدم + فك ضغط ملف zip
+async function fetchSubDLDirect(imdbId, season, episode, apiKey) {
+  if (!apiKey) return [];
+  try {
+    const params = new URLSearchParams({ api_key: apiKey.trim(), imdb_id: imdbId, languages: 'AR,EN' });
+    if (season) params.set('season_number', season);
+    if (episode) params.set('episode_number', episode);
+
+    const r = await axios.get(`https://api.subdl.com/api/v1/subtitles?${params.toString()}`, { timeout: 8000 });
+    const items = r.data?.subtitles || [];
+    const out = [];
+
+    for (const item of items) {
+      if (!item.url) continue;
+      const zipUrl = item.url.startsWith('http') ? item.url : `https://dl.subdl.com${item.url}`;
+      out.push({ zipUrl, lang: (item.lang || 'en').toLowerCase() });
+    }
+    return out;
+  } catch (e) {
+    logErr('subdl:direct', e);
+    return [];
+  }
 }
 
 // معالج جلب الترجمات الشامل
@@ -428,7 +539,7 @@ const handleSubtitles = async (req, res) => {
 
   if (req.params.config) {
     try {
-      const p = JSON.parse(Buffer.from(req.params.config, 'base64').toString('utf8'));
+      const p = JSON.parse(base64UrlDecode(req.params.config));
       if (p.limit) limit = p.limit;
       if (p.geminiKey) geminiKey = p.geminiKey;
       if (p.groqKey) groqKey = p.groqKey;
@@ -439,7 +550,9 @@ const handleSubtitles = async (req, res) => {
       if (p.subdlKey) subdlKey = p.subdlKey;
       if (p.wyzieKey) wyzieKey = p.wyzieKey;
       if (p.format) prefFormat = p.format;
-    } catch (e) {}
+    } catch (e) {
+      logErr('config:decode', e);
+    }
   }
 
   const clientHeaders = {
@@ -460,37 +573,46 @@ const handleSubtitles = async (req, res) => {
   for (const tid of targetIds) {
     const fetchType = (tid.startsWith('kitsu') || type === 'anime') ? 'series' : type;
 
-    // OpenSubtitles
+    // OpenSubtitles (مرايا مجتمعية مجانية)
     requests.push(
-      axios.get(`https://opensubtitles-v3.strem.io/subtitles/${fetchType}/${tid}.json`, { headers: clientHeaders, timeout: 4500 })
-        .then(r => r.data?.subtitles || []).catch(() => []),
-      axios.get(`https://opensubtitles.strem.fun/subtitles/${fetchType}/${tid}.json`, { headers: clientHeaders, timeout: 4500 })
-        .then(r => r.data?.subtitles || []).catch(() => [])
+      axios.get(`https://opensubtitles-v3.strem.io/subtitles/${fetchType}/${tid}.json`, { headers: clientHeaders, timeout: 6000 })
+        .then(r => r.data?.subtitles || []).catch(e => { logErr('mirror:opensub-v3', e); return []; }),
+      axios.get(`https://opensubtitles.strem.fun/subtitles/${fetchType}/${tid}.json`, { headers: clientHeaders, timeout: 6000 })
+        .then(r => r.data?.subtitles || []).catch(e => { logErr('mirror:opensub-fun', e); return []; })
     );
 
-    // SubDL
+    // SubDL (مرآة مجتمعية)
     requests.push(
-      axios.get(`https://subdl-stremio.vercel.app/subtitles/${fetchType}/${tid}.json`, { headers: clientHeaders, timeout: 4500 })
-        .then(r => r.data?.subtitles || []).catch(() => [])
+      axios.get(`https://subdl-stremio.vercel.app/subtitles/${fetchType}/${tid}.json`, { headers: clientHeaders, timeout: 6000 })
+        .then(r => r.data?.subtitles || []).catch(e => { logErr('mirror:subdl', e); return []; })
     );
 
     // Subscene & YTS
     requests.push(
-      axios.get(`https://subscene.strem.fun/subtitles/${fetchType}/${tid}.json`, { headers: clientHeaders, timeout: 4000 })
-        .then(r => r.data?.subtitles || []).catch(() => []),
-      axios.get(`https://yifysubtitles.strem.fun/subtitles/${fetchType}/${tid}.json`, { headers: clientHeaders, timeout: 4000 })
-        .then(r => r.data?.subtitles || []).catch(() => [])
+      axios.get(`https://subscene.strem.fun/subtitles/${fetchType}/${tid}.json`, { headers: clientHeaders, timeout: 6000 })
+        .then(r => r.data?.subtitles || []).catch(e => { logErr('mirror:subscene', e); return []; }),
+      axios.get(`https://yifysubtitles.strem.fun/subtitles/${fetchType}/${tid}.json`, { headers: clientHeaders, timeout: 6000 })
+        .then(r => r.data?.subtitles || []).catch(e => { logErr('mirror:yify', e); return []; })
     );
 
     // مصادر الأنمي
     if (tid.startsWith('kitsu') || tid.startsWith('anilist') || fetchType === 'series') {
       requests.push(
-        axios.get(`https://anime-subtitles.strem.fun/subtitles/series/${tid}.json`, { headers: clientHeaders, timeout: 4500 })
-          .then(r => r.data?.subtitles || []).catch(() => []),
-        axios.get(`https://kitsunekko-subtitles.strem.fun/subtitles/series/${tid}.json`, { headers: clientHeaders, timeout: 4500 })
-          .then(r => r.data?.subtitles || []).catch(() => []),
-        axios.get(`https://subanime.strem.fun/subtitles/series/${tid}.json`, { headers: clientHeaders, timeout: 4500 })
-          .then(r => r.data?.subtitles || []).catch(() => [])
+        axios.get(`https://anime-subtitles.strem.fun/subtitles/series/${tid}.json`, { headers: clientHeaders, timeout: 6000 })
+          .then(r => r.data?.subtitles || []).catch(e => { logErr('mirror:anime-subs', e); return []; }),
+        axios.get(`https://kitsunekko-subtitles.strem.fun/subtitles/series/${tid}.json`, { headers: clientHeaders, timeout: 6000 })
+          .then(r => r.data?.subtitles || []).catch(e => { logErr('mirror:kitsunekko', e); return []; }),
+        axios.get(`https://subanime.strem.fun/subtitles/series/${tid}.json`, { headers: clientHeaders, timeout: 6000 })
+          .then(r => r.data?.subtitles || []).catch(e => { logErr('mirror:subanime', e); return []; })
+      );
+    }
+
+    // OpenSubtitles الرسمي (باستخدام مفتاح المستخدم إن وُجد)
+    if (openSubKey && tid.startsWith('tt')) {
+      const { imdbId, season, episode } = parseImdbId(tid);
+      requests.push(
+        fetchOpenSubtitlesDirect(imdbId, season, episode, openSubKey)
+          .then(list => list.map(x => ({ url: x.url, lang: x.lang })))
       );
     }
   }
@@ -499,7 +621,7 @@ const handleSubtitles = async (req, res) => {
   if (animeInfo?.title) {
     const q = `${animeInfo.title} ${animeInfo.ep}`;
     requests.push(
-      axios.get(`https://animetosho.org/api/v1/search?q=${encodeURIComponent(q)}`, { timeout: 4000 })
+      axios.get(`https://animetosho.org/api/v1/search?q=${encodeURIComponent(q)}`, { timeout: 6000 })
         .then(r => {
           const files = [];
           (r.data?.results || []).forEach((item, idx) => {
@@ -508,8 +630,19 @@ const handleSubtitles = async (req, res) => {
             }
           });
           return files;
-        }).catch(() => [])
+        }).catch(e => { logErr('animetosho', e); return []; })
     );
+  }
+
+  // SubDL الرسمي (zip يحتاج فك ضغط)
+  let subdlZipEntries = [];
+  if (subdlKey) {
+    for (const tid of targetIds) {
+      if (!tid.startsWith('tt')) continue;
+      const { imdbId, season, episode } = parseImdbId(tid);
+      const zips = await fetchSubDLDirect(imdbId, season, episode, subdlKey);
+      subdlZipEntries.push(...zips);
+    }
   }
 
   try {
@@ -547,14 +680,29 @@ const handleSubtitles = async (req, res) => {
       }
     }
 
+    // إضافة روابط SubDL (تمر عبر مسار فك الضغط /subdl-extract)
+    for (const entry of subdlZipEntries) {
+      if (seenUrls.has(entry.zipUrl)) continue;
+      seenUrls.add(entry.zipUrl);
+      const extractUrl = `${protocol}://${host}/subdl-extract?zipUrl=${encodeURIComponent(entry.zipUrl)}`;
+      const bucket = entry.lang.startsWith('ar') ? arabicSubs : nonArabicSubs;
+      bucket.push({
+        id: `sub_subdl_${bucket.length + 1}`,
+        url: extractUrl,
+        lang: entry.lang.startsWith('ar') ? 'ara' : entry.lang
+      });
+    }
+
     let combinedSubs = [...arabicSubs, ...nonArabicSubs];
+
+    console.log(`[subtitles] ${type}/${targetId} -> عربي: ${arabicSubs.length}, أجنبي: ${nonArabicSubs.length}`);
 
     // إضافة ترجمات الذكاء الاصطناعي (حتى 5 نتائج) في نهاية القائمة
     const hasAiKey = geminiKey || groqKey || deeplKey || openaiKey;
     if (nonArabicSubs.length > 0 && hasAiKey) {
       const candidates = nonArabicSubs.slice(0, 5);
       candidates.forEach((cand, idx) => {
-        const aiProxyUrl = `${protocol}://${host}/translate?subUrl=${encodeURIComponent(cand.url)}&geminiKey=${geminiKey}&groqKey=${groqKey}&deeplKey=${deeplKey}&openaiKey=${openaiKey}&format=${prefFormat}`;
+        const aiProxyUrl = `${protocol}://${host}/translate?subUrl=${encodeURIComponent(cand.url)}&geminiKey=${encodeURIComponent(geminiKey)}&groqKey=${encodeURIComponent(groqKey)}&deeplKey=${encodeURIComponent(deeplKey)}&openaiKey=${encodeURIComponent(openaiKey)}&format=${encodeURIComponent(prefFormat)}`;
 
         combinedSubs.push({
           id: `ai_sub_${idx + 1}`,
@@ -566,9 +714,37 @@ const handleSubtitles = async (req, res) => {
 
     return res.json({ subtitles: combinedSubs.slice(0, limit) });
   } catch (error) {
+    logErr('handleSubtitles:main', error);
     return res.json({ subtitles: [] });
   }
 };
+
+// فك ضغط ملف SubDL zip وإرجاع أول ملف ترجمة بداخله
+app.get('/subdl-extract', async (req, res) => {
+  const { zipUrl } = req.query;
+  if (!zipUrl) return res.status(400).send("No zip URL");
+
+  try {
+    const zipRes = await axios.get(zipUrl, { responseType: 'arraybuffer', timeout: 12000 });
+    const zip = new AdmZip(Buffer.from(zipRes.data));
+    const entries = zip.getEntries().filter(e =>
+      /\.(srt|ass|ssa|vtt)$/i.test(e.entryName)
+    );
+
+    if (entries.length === 0) return res.status(404).send("No subtitle file found in archive");
+
+    // نفضّل ملف srt إن وجد، وإلا أول ملف متاح
+    const chosen = entries.find(e => e.entryName.toLowerCase().endsWith('.srt')) || entries[0];
+    const content = chosen.getData().toString('utf8');
+
+    const ext = chosen.entryName.split('.').pop().toLowerCase();
+    res.setHeader('Content-Type', ext === 'ass' || ext === 'ssa' ? 'text/x-ssa; charset=utf-8' : 'text/plain; charset=utf-8');
+    res.send(content);
+  } catch (err) {
+    logErr('subdl-extract', err);
+    res.status(500).send("Failed to extract subtitle archive");
+  }
+});
 
 app.get('/subtitles/:type/:id.json', handleSubtitles);
 app.get('/subtitles/:type/:id/:extra.json', handleSubtitles);
