@@ -20,7 +20,7 @@ const manifest = {
   catalogs: []
 };
 
-// ============= 15. التدوير الذكي لوكلاء المستخدم =============
+// ============= التدوير الذكي لوكلاء المستخدم =============
 const USER_AGENTS = [
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Safari/605.1.15',
@@ -52,6 +52,18 @@ function logErr(label, err) {
 
 function isAssUrl(url) { return /\.(ass|ssa)(\?|$)/i.test(url || ''); }
 
+// إصلاح #1: فحص صحّة الترميز فعليًا بدل شرط كان يتحقق دائمًا (كل نص يحتوي على "").
+// نحاول فك UTF-8 بشكل صارم (fatal)؛ لو فشل، فهذا يعني أن الملف بترميز قديم مثل
+// Windows-1256 وليس UTF-8 فعلاً، فنعيد فكه بهذا الترميز. الملفات السليمة لا تُلمس إطلاقًا.
+function safeDecodeText(buf) {
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(buf);
+  } catch (e) {
+    try { return iconv.decode(buf, 'win1256'); }
+    catch (e2) { return buf.toString('utf8'); }
+  }
+}
+
 function decodeConfig(token) {
   const keys = { geminiKey: '', groqKey: '', deeplKey: '', openaiKey: '', jimakuKey: '', subsourceKey: '', openSubKey: '', subdlKey: '', wyzieKey: '', limit: 50 };
   if (!token) return keys;
@@ -70,7 +82,7 @@ const SOURCE_LABELS = {
 };
 function sourceLabelOf(key) { return SOURCE_LABELS[key] || 'Source'; }
 
-// ============= 9. حماية هندسة ASS و Masking =============
+// ============= حماية هندسة ASS و Masking =============
 const ASS_DEFAULT_HEADER = `[Script Info]
 ScriptType: v4.00+
 Collisions: Normal
@@ -120,7 +132,7 @@ function parseAss(text) {
   const formatIdx = lines.findIndex((l, i) => i > eventsIdx && /^Format:/i.test(l.trim()));
   if (formatIdx === -1) return null;
   const fieldsLen = lines[formatIdx].split(':').slice(1).join(':').split(',').length;
-  
+
   const headerLines = lines.slice(0, formatIdx + 1);
   const dialogues = [];
   for (let i = formatIdx + 1; i < lines.length; i++) {
@@ -144,10 +156,10 @@ function unmaskTags(text, tags) {
   return unmasked;
 }
 
-// ============= 8. الترجمة الصارمة =============
+// ============= الترجمة الصارمة =============
 async function translateChunkJSON(texts, provider, key) {
   const prompt = `You are a professional subtitle translator. Target Language: ARABIC ONLY.
-Task: Translate the following JSON array of strings into Arabic. 
+Task: Translate the following JSON array of strings into Arabic.
 Rules:
 1. MUST return a raw JSON object with a single key "data" containing an array of the translated strings. Example: {"data": ["مرحبا", "كيف حالك"]}.
 2. Keep any tags like [T0], \\N exactly where they are.
@@ -204,7 +216,7 @@ async function translateTextArray(texts, keys) {
   return results;
 }
 
-// ============= 3 & 4 & 6. التخزين المؤقت، الجسر المزدوج، وأفلام الأنمي =============
+// ============= التخزين المؤقت، الجسر المزدوج، وأفلام الأنمي =============
 let animeListCache = null;
 let animeListCacheTime = 0;
 const idResolveCache = new Map();
@@ -231,25 +243,34 @@ async function resolveExternalId(rawId) {
       const extId = parts[1];
       result.absoluteEp = parts[2] ? parseInt(parts[2]) : null;
       if (!result.absoluteEp) result.isMovie = true;
-      
+
       const field = prefix === 'kitsu' ? 'kitsu_id' : prefix === 'mal' ? 'mal_id' : 'anilist_id';
       const entry = map.find(e => String(e[field]) === String(extId));
       result.kitsuId = entry?.kitsu_id || (prefix === 'kitsu' ? extId : null);
-      
+
       if (prefix === 'kitsu') {
         const res = await axios.get(`https://kitsu.io/api/edge/anime/${extId}`, getAxiosConfig()).catch(()=>null);
         result.title = res?.data?.data?.attributes?.canonicalTitle || null;
+      } else if (prefix === 'mal') {
+        const res = await axios.get(`https://api.jikan.moe/v4/anime/${extId}`, getAxiosConfig()).catch(()=>null);
+        result.title = res?.data?.data?.title || res?.data?.data?.title_english || null;
+      } else if (prefix === 'anilist') {
+        try {
+          const q = `query($id:Int){Media(id:$id,type:ANIME){title{romaji english}}}`;
+          const r = await axios.post('https://graphql.anilist.co', { query: q, variables: { id: parseInt(extId) } }, getAxiosConfig({ 'Content-Type': 'application/json' }));
+          result.title = r.data?.data?.Media?.title?.english || r.data?.data?.Media?.title?.romaji || null;
+        } catch (e) { logErr('anilist:title', e); }
       }
-      
+
       if (entry?.imdb_id) {
         const iId = Array.isArray(entry.imdb_id) ? entry.imdb_id[0] : String(entry.imdb_id).split(',')[0].trim();
         result.imdbId = result.isMovie ? iId : `${iId}:${entry.season?.tvdb ?? 1}:${result.absoluteEp + (entry.episode_offset?.tvdb ?? 0)}`;
       }
-    } 
-    else if (prefix === 'tt') {
+    }
+    else if (rawId.startsWith('tt')) {
       const extId = parts[0], season = parts[1] ? parseInt(parts[1]) : null, episode = parts[2] ? parseInt(parts[2]) : null;
       if (!season && !episode) result.isMovie = true;
-      
+
       const entry = map.find(e => {
         const ids = Array.isArray(e.imdb_id) ? e.imdb_id : String(e.imdb_id).split(',');
         return ids.includes(extId) && (season == null || (e.season?.tvdb ?? 1) === season);
@@ -260,7 +281,7 @@ async function resolveExternalId(rawId) {
       }
       result.imdbId = rawId;
     }
-    
+
     idResolveCache.set(rawId, result);
     return result;
   } catch (e) { logErr('resolveExternalId', e); return null; }
@@ -313,10 +334,46 @@ async function fetchWyzieDirect(imdbId, season, episode, apiKey, seasonPack = fa
   } catch (e) { logErr('wyzieDirect', e); return []; }
 }
 
+// إصلاح البند 5: البحث الاحتياطي بالاسم — يُستخدم فقط عندما يفشل البحث بالمعرف تمامًا
+async function fetchOpenSubtitlesByName(title, apiKey) {
+  if (!apiKey || !title) return [];
+  try {
+    const r = await axios.get(`https://api.opensubtitles.com/api/v1/subtitles?query=${encodeURIComponent(title)}&languages=ar,en`, getAxiosConfig({ 'Api-Key': apiKey.trim() }));
+    const items = r.data?.data || [];
+    const out = [];
+    for (const item of items) {
+      const fId = item.attributes?.files?.[0]?.file_id;
+      if (!fId) continue;
+      try {
+        const dl = await axios.post('https://api.opensubtitles.com/api/v1/download', { file_id: fId }, getAxiosConfig({ 'Api-Key': apiKey.trim(), 'Content-Type': 'application/json' }));
+        if (dl.data?.link) out.push({ url: dl.data.link, lang: item.attributes.language || 'en', origName: item.attributes.release || item.attributes.files?.[0]?.file_name, _source: 'opensub-official' });
+      } catch (e) { logErr('openSubByName:download', e); }
+    }
+    return out;
+  } catch (e) { logErr('openSubByName', e); return []; }
+}
+
+async function fetchSubDLByName(title, apiKey) {
+  if (!apiKey || !title) return [];
+  try {
+    const r = await axios.get(`https://api.subdl.com/api/v1/subtitles?api_key=${encodeURIComponent(apiKey.trim())}&film_name=${encodeURIComponent(title)}&languages=AR,EN`, getAxiosConfig());
+    return (r.data?.subtitles || []).filter(item => item.url).map(item => ({
+      zipUrl: item.url.startsWith('http') ? item.url : `https://dl.subdl.com${item.url}`,
+      lang: (item.lang || 'en').toLowerCase(),
+      origName: item.release_name || item.name,
+      _source: 'subdl-official'
+    }));
+  } catch (e) { logErr('subdlByName', e); return []; }
+}
+
 function mirrorRequest(url, sourceKey, seasonPack) {
   return axios.get(url, getAxiosConfig())
-    .then(r => (r.data?.subtitles || []).map(s => ({ url: s.url, lang: s.lang, origName: s.title || s.SubFileName || s.release || s.name, _source: sourceKey, _seasonPack: !!seasonPack })))
-    .catch(() => []);
+    .then(r => {
+      const list = r.data?.subtitles || [];
+      console.log(`[mirror:${sourceKey}] ${list.length} نتيجة`);
+      return list.map(s => ({ url: s.url, lang: s.lang, origName: s.title || s.SubFileName || s.release || s.name, _source: sourceKey, _seasonPack: !!seasonPack }));
+    })
+    .catch(e => { logErr(`mirror:${sourceKey}`, e); return []; });
 }
 
 function buildMirrorRequests(tid, fetchType, seasonPack = false) {
@@ -374,7 +431,7 @@ app.post('/test-key', async (req, res) => {
     }
     if (provider === 'jimaku') return res.json({ success: true, message: "مفتاح Jimaku صالح ومحفوظ ✅" });
     if (provider === 'wyzie') return res.json({ success: true, message: "مفتاح Wyzie صالح ومحفوظ ✅" });
-    
+
     return res.json({ success: false, message: "المفتاح غير صالح ❌" });
   } catch (err) {
     return res.json({ success: false, message: "فشل الفحص: تأكد من صحة المفتاح ❌" });
@@ -409,6 +466,11 @@ app.get(['/', '/configure'], (req, res) => {
         .test-msg { font-size: 11px; margin-top: 4px; display: none; }
         .btn-install { width: 100%; padding: 14px; margin-top: 20px; border-radius: 8px; border: none; background: #0284c7; color: #fff; font-weight: bold; cursor: pointer; font-size: 15px; }
         .btn-install:hover { background: #0369a1; }
+        .btn-copy { width: 100%; padding: 12px; margin-top: 10px; border-radius: 8px; border: 1px solid #475569; background: transparent; color: #38bdf8; font-weight: bold; cursor: pointer; font-size: 14px; }
+        .btn-copy:hover { background: #263449; }
+        .link-box { display: none; margin-top: 10px; }
+        .link-box input { font-size: 11px; direction: ltr; text-align: left; color: #94a3b8; }
+        .copy-msg { font-size: 12px; margin-top: 6px; text-align: center; display: none; }
         .hint { font-size: 11px; color: #64748b; margin-top: 6px; line-height: 1.5; }
       </style>
     </head>
@@ -485,6 +547,9 @@ app.get(['/', '/configure'], (req, res) => {
         </div>
 
         <button class="btn-install" onclick="install()">تثبيت / تحديث في Nuvio</button>
+        <button class="btn-copy" onclick="copyLink()">📋 نسخ رابط الإضافة</button>
+        <div class="link-box" id="linkBox"><input type="text" id="linkOutput" readonly onclick="this.select()"></div>
+        <div id="copyMsg" class="copy-msg"></div>
       </div>
 
       <script>
@@ -500,7 +565,7 @@ app.get(['/', '/configure'], (req, res) => {
           } catch (e) { msgEl.style.color = '#ef4444'; msgEl.innerText = 'تعذر الاتصال بالخادم ❌'; }
         }
         function toBase64Url(str) { return btoa(str).replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, ''); }
-        function install() {
+        function buildManifestUrl() {
           const config = toBase64Url(JSON.stringify({
             geminiKey: document.getElementById('geminiKey').value.trim(), groqKey: document.getElementById('groqKey').value.trim(),
             deeplKey: document.getElementById('deeplKey').value.trim(), openaiKey: document.getElementById('openaiKey').value.trim(),
@@ -508,7 +573,29 @@ app.get(['/', '/configure'], (req, res) => {
             openSubKey: document.getElementById('openSubKey').value.trim(), subdlKey: document.getElementById('subdlKey').value.trim(),
             wyzieKey: document.getElementById('wyzieKey').value.trim(), limit: document.getElementById('limit').value
           }));
-          window.location.href = 'nuvio://' + (window.location.origin + '/' + config + '/manifest.json').replace(/^https?:\\/\\//, '');
+          return window.location.origin + '/' + config + '/manifest.json';
+        }
+        function install() {
+          window.location.href = 'nuvio://' + buildManifestUrl().replace(/^https?:\\/\\//, '');
+        }
+        async function copyLink() {
+          const url = buildManifestUrl();
+          const linkBox = document.getElementById('linkBox');
+          const linkOutput = document.getElementById('linkOutput');
+          const msg = document.getElementById('copyMsg');
+          linkOutput.value = url;
+          linkBox.style.display = 'block';
+          try {
+            await navigator.clipboard.writeText(url);
+            msg.style.color = '#22c55e';
+            msg.innerText = 'تم نسخ الرابط بنجاح ✅';
+          } catch (e) {
+            linkOutput.select();
+            msg.style.color = '#f59e0b';
+            msg.innerText = 'تعذر النسخ التلقائي، الرابط محدد بالأعلى - انسخه يدويًا';
+          }
+          msg.style.display = 'block';
+          setTimeout(() => { msg.style.display = 'none'; }, 4000);
         }
       </script>
     </body>
@@ -518,15 +605,15 @@ app.get(['/', '/configure'], (req, res) => {
 
 app.get(['/manifest.json', '/:config/manifest.json'], (req, res) => res.json(manifest));
 
-// ============= الترجمة الفورية (14. إصلاح الترميز & 8. الفشل الصامت) =============
+// ============= الترجمة الفورية =============
 app.get(['/translate', '/:config/translate', '/translate/trans.ass', '/:config/translate/trans.ass'], async (req, res) => {
   const subUrl = req.query.subUrl; if (!subUrl) return res.status(400).send("No URL");
   const keys = req.params.config ? decodeConfig(req.params.config) : req.query;
   let text;
   try {
     const r = await axios.get(subUrl, { responseType: 'arraybuffer', timeout: 12000, headers: {'User-Agent': USER_AGENTS[0]} });
-    const buf = Buffer.from(r.data); text = buf.toString('utf8');
-    if (text.includes('')) text = iconv.decode(buf, 'win1256');
+    const buf = Buffer.from(r.data);
+    text = safeDecodeText(buf);
   } catch (err) { return res.redirect(subUrl); }
 
   const isAss = isAssUrl(subUrl) || /^\uFEFF?\[Script Info\]/im.test(text);
@@ -537,7 +624,7 @@ app.get(['/translate', '/:config/translate', '/translate/trans.ass', '/:config/t
     if (cues.length > 0) {
       const masked = cues.map(c => { const m = maskTags(c.text); return { txt: c.text, masked: m.masked, tags: m.tags }; });
       const trans = await translateTextArray(masked.map(c => c.masked), keys);
-      
+
       if (trans && trans.length === cues.length) {
         if (assP) {
           const lines = [...assP.headerLines];
@@ -555,13 +642,13 @@ app.get(['/translate', '/:config/translate', '/translate/trans.ass', '/:config/t
   res.setHeader('Content-Type', 'text/x-ssa; charset=utf-8'); res.send(outText);
 });
 
-// ============= جلب الترجمات الشاملة (2. و 7. إلغاء الفحص الصارم) =============
+// ============= جلب الترجمات الشاملة =============
 app.get(['/subtitles/:type/:id.json', '/subtitles/:type/:id/:extra.json', '/:config/subtitles/:type/:id.json', '/:config/subtitles/:type/:id/:extra.json'], async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   const { type, id, extra } = req.params;
   const targetId = extra && extra.endsWith('.json') ? `${id}/${extra.replace('.json', '')}` : id.replace('.json', '');
   const config = decodeConfig(req.params.config);
-  
+
   const animeInfo = await resolveExternalId(targetId);
   const tIds = [targetId];
   if (animeInfo?.imdbId && !tIds.includes(animeInfo.imdbId)) tIds.push(animeInfo.imdbId);
@@ -587,7 +674,7 @@ app.get(['/subtitles/:type/:id.json', '/subtitles/:type/:id/:extra.json', '/:con
   }
 
   if (animeInfo?.title) {
-    reqs.push(axios.get(`https://animetosho.org/api/v1/search?q=${encodeURIComponent(`${animeInfo.title} ${animeInfo.absoluteEp||''}`.trim())}`, getAxiosConfig()).then(r => (r.data?.results||[]).filter(i=>i.attachment_url).map(i=>({ url: i.attachment_url, lang: 'eng', origName: i.title, _source: 'animetosho' }))).catch(()=>[]));
+    reqs.push(axios.get(`https://animetosho.org/api/v1/search?q=${encodeURIComponent(`${animeInfo.title} ${animeInfo.absoluteEp||''}`.trim())}`, getAxiosConfig()).then(r => (r.data?.results||[]).filter(i=>i.attachment_url).map(i=>({ url: i.attachment_url, lang: 'eng', origName: i.title, _source: 'animetosho' }))).catch(e => { logErr('animetosho', e); return []; }));
   }
 
   let subdlZips = [];
@@ -599,8 +686,22 @@ app.get(['/subtitles/:type/:id.json', '/subtitles/:type/:id/:extra.json', '/:con
   const results = await Promise.all(reqs);
   let rawSubs = results.flat();
   const host = req.get('host'), protocol = req.protocol;
-  
+
   subdlZips.forEach(z => rawSubs.push({ ...z, url: `${protocol}://${host}/subdl-extract?zipUrl=${encodeURIComponent(z.zipUrl)}` }));
+
+  console.log(`[subtitles] ${type}/${targetId} -> tIds:[${tIds.join(', ')}] | نتائج البحث بالمعرف: ${rawSubs.length}`);
+
+  // البند 5: البحث الاحتياطي بالاسم — يعمل فقط عندما يفشل البحث بالمعرف تمامًا ولدينا عنوان معروف
+  if (rawSubs.length === 0 && animeInfo?.title && (config.openSubKey || config.subdlKey)) {
+    console.log(`[fallback] البحث بالمعرف فشل، تجربة البحث بالاسم: "${animeInfo.title}"`);
+    const [byNameOS, byNameSubDL] = await Promise.all([
+      fetchOpenSubtitlesByName(animeInfo.title, config.openSubKey),
+      fetchSubDLByName(animeInfo.title, config.subdlKey)
+    ]);
+    rawSubs.push(...byNameOS);
+    byNameSubDL.forEach(z => rawSubs.push({ ...z, url: `${protocol}://${host}/subdl-extract?zipUrl=${encodeURIComponent(z.zipUrl)}` }));
+    console.log(`[fallback] نتائج البحث بالاسم: ${byNameOS.length + byNameSubDL.length}`);
+  }
 
   const uMap = new Map();
   for (const s of rawSubs) {
@@ -611,14 +712,17 @@ app.get(['/subtitles/:type/:id.json', '/subtitles/:type/:id/:extra.json', '/:con
   }
   rawSubs = Array.from(uMap.values());
 
+  // ملاحظة مهمة: كثير من مشغّلات Stremio (ومنها Nuvio) تعرض حقل "lang" حرفيًا كتسمية
+  // الترجمة في القائمة، وتتجاهل حقلي name/title تمامًا لأنهما ليسا جزءًا من المواصفة
+  // الرسمية. لهذا نضع التسمية الكاملة (الاسم + المصدر + الصيغة) داخل lang نفسه
+  // حتى تظهر فعليًا، بدل الاعتماد فقط على name/title كما كان سابقًا.
   const arSubs = [], enSubs = [];
   for (const s of rawSubs) {
     const l = (s.lang||'').toLowerCase(), isAr = l==='ara'||l==='ar'||l.includes('ara');
     const orig = s.origName || (isAr ? 'ترجمة عربية' : 'Subtitle');
     const tag = s._seasonPack ? ' [باقة الموسم]' : '';
-    // 11 و 12. التسمية الإجبارية مع تطبيق علامات التوجيه المخفية للغة العربية
-    const name = `\u200F${orig}\u200E \u200F•\u200E \u200F${sourceLabelOf(s._source)}\u200E \u200F•\u200E \u200F${s._ext.toUpperCase()}\u200E${tag}`;
-    const formatted = { id: `sub_${s.url.slice(-10)}`, url: s.url, lang: isAr ? 'ara' : (l||'eng'), name, title: name, _ext: s._ext, _source: s._source, origName: orig };
+    const label = `${orig} • ${sourceLabelOf(s._source)} • ${s._ext.toUpperCase()}${tag}`;
+    const formatted = { id: `sub_${s.url.slice(-10)}`, url: s.url, lang: label, name: label, title: label, _ext: s._ext, _source: s._source, origName: orig };
     isAr ? arSubs.push(formatted) : enSubs.push(formatted);
   }
 
@@ -626,18 +730,18 @@ app.get(['/subtitles/:type/:id.json', '/subtitles/:type/:id/:extra.json', '/:con
   const sorter = (a, b) => (rank[a._ext]??3) - (rank[b._ext]??3);
   arSubs.sort(sorter); enSubs.sort(sorter);
 
-  // 13. القطع بناء على الحد المختار
   const limitedAr = arSubs.slice(0, config.limit);
 
-  // 1 & 12. تراجم الذكاء الاصطناعي الثابتة بـ 5 وتسميتها الإجبارية (trans)
   const aiSubs = [];
   if (enSubs.length > 0 && (config.geminiKey || config.groqKey || config.openaiKey || config.deeplKey)) {
     const base = req.params.config ? `${protocol}://${host}/${req.params.config}` : `${protocol}://${host}`;
     enSubs.slice(0, 5).forEach((c, idx) => {
-      const aiName = `\u200F${c.origName}\u200E \u200F•\u200E \u200F${sourceLabelOf(c._source)}\u200E \u200F•\u200E \u200Ftrans\u200E \u200F•\u200E \u200FASS\u200E`;
-      aiSubs.push({ id: `trans_${idx+1}`, url: `${base}/translate/trans.ass?subUrl=${encodeURIComponent(c.url)}`, lang: 'ara', name: aiName, title: aiName });
+      const aiLabel = `${c.origName} • ${sourceLabelOf(c._source)} • trans • ASS`;
+      aiSubs.push({ id: `trans_${idx+1}`, url: `${base}/translate/trans.ass?subUrl=${encodeURIComponent(c.url)}`, lang: aiLabel, name: aiLabel, title: aiLabel });
     });
   }
+
+  console.log(`[subtitles] ${type}/${targetId} -> عربي:${arSubs.length} (معروض:${limitedAr.length}) | أجنبي:${enSubs.length} | AI:${aiSubs.length}`);
 
   res.json({ subtitles: [...limitedAr.map(({_ext,_source,origName,...rest})=>rest), ...aiSubs] });
 });
