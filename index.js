@@ -82,6 +82,14 @@ const SOURCE_LABELS = {
 };
 function sourceLabelOf(key) { return SOURCE_LABELS[key] || 'Source'; }
 
+// يبني اسم ملف نظيف وقصير لوضعه داخل مسار الرابط (بدل الاعتماد فقط على query string)
+// بعض المشغلات تعرض آخر جزء من مسار الرابط كتسمية للترجمة، فوضع الامتداد هنا
+// قد يجعله يظهر فعليًا حتى لو تجاهل المشغل حقلي name/title.
+function slugify(str) {
+  return (str || 'subtitle').toString().normalize('NFKD')
+    .replace(/[^\w\u0600-\u06FF\- ]/g, '').trim().replace(/\s+/g, '-').slice(0, 60) || 'subtitle';
+}
+
 // ============= حماية هندسة ASS و Masking =============
 const ASS_DEFAULT_HEADER = `[Script Info]
 ScriptType: v4.00+
@@ -156,6 +164,21 @@ function unmaskTags(text, tags) {
   return unmasked;
 }
 
+function assSecondsToTime(total) {
+  const h = Math.floor(total / 3600), m = Math.floor((total % 3600) / 60), s = Math.floor(total % 60);
+  return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.00`;
+}
+
+// بدل رسالة خطأ لمدة 10 ثوانٍ فقط (قد يفوّتها المشاهد)، نكررها كل 3 دقائق حتى 3 ساعات
+function buildRepeatingErrorAss(headerLines, message) {
+  const lines = [...headerLines];
+  const totalSeconds = 3 * 60 * 60, interval = 180;
+  for (let t = 0; t < totalSeconds; t += interval) {
+    lines.push(`Dialogue: 0,${assSecondsToTime(t)},${assSecondsToTime(t + 8)},Default,,0,0,0,,\u200F${message}`);
+  }
+  return lines.join('\n') + '\n';
+}
+
 // ============= الترجمة الصارمة =============
 async function translateChunkJSON(texts, provider, key) {
   const prompt = `You are a professional subtitle translator. Target Language: ARABIC ONLY.
@@ -166,12 +189,17 @@ Rules:
 3. NEVER return English text.
 Length: ${texts.length}. Input: ${JSON.stringify(texts)}`;
 
+  const t0 = Date.now();
   try {
     if (provider === 'gemini') {
       const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${encodeURIComponent(key.trim())}`;
       const r = await axios.post(url, { contents: [{ parts: [{ text: prompt }] }], generationConfig: { response_mime_type: 'application/json' } }, getAxiosConfig({'Content-Type': 'application/json'}));
       const raw = r.data?.candidates?.[0]?.content?.parts?.[0]?.text;
-      if (raw) return (JSON.parse(raw)).data || JSON.parse(raw);
+      if (raw) {
+        const parsed = (JSON.parse(raw)).data || JSON.parse(raw);
+        console.log(`[translateChunk:gemini] ${texts.length} سطر خلال ${((Date.now()-t0)/1000).toFixed(1)}s`);
+        return parsed;
+      }
     }
     if (provider === 'groq' || provider === 'openai') {
       const isGroq = provider === 'groq';
@@ -179,18 +207,28 @@ Length: ${texts.length}. Input: ${JSON.stringify(texts)}`;
       const model = isGroq ? 'llama-3.3-70b-versatile' : 'gpt-4o-mini';
       const r = await axios.post(url, { model, messages: [{ role: 'user', content: prompt }], response_format: { type: 'json_object' } }, getAxiosConfig({ Authorization: `Bearer ${key.trim()}`, 'Content-Type': 'application/json' }));
       const raw = r.data?.choices?.[0]?.message?.content;
-      if (raw) return (JSON.parse(raw)).data || JSON.parse(raw).translations;
+      if (raw) {
+        const parsed = (JSON.parse(raw)).data || JSON.parse(raw).translations;
+        console.log(`[translateChunk:${provider}] ${texts.length} سطر خلال ${((Date.now()-t0)/1000).toFixed(1)}s`);
+        return parsed;
+      }
     }
     if (provider === 'deepl') {
       const isFree = key.trim().endsWith(':fx');
       const dUrl = isFree ? 'https://api-free.deepl.com/v2/translate' : 'https://api.deepl.com/v2/translate';
       const r = await axios.post(dUrl, { text: texts, target_lang: 'AR', preserve_formatting: true }, getAxiosConfig({ Authorization: `DeepL-Auth-Key ${key.trim()}`, 'Content-Type': 'application/json' }));
-      if (r.data?.translations?.length === texts.length) return r.data.translations.map(t => t.text);
+      if (r.data?.translations?.length === texts.length) {
+        console.log(`[translateChunk:deepl] ${texts.length} سطر خلال ${((Date.now()-t0)/1000).toFixed(1)}s`);
+        return r.data.translations.map(t => t.text);
+      }
     }
-  } catch (e) { logErr(`translateChunk:${provider}`, e); }
+  } catch (e) { logErr(`translateChunk:${provider}(${((Date.now()-t0)/1000).toFixed(1)}s)`, e); }
   return null;
 }
 
+// إصلاح: تنفيذ الدفعات بالتوازي بدل التتابع (أسرع بكثير)، وقبول نجاح جزئي -
+// لو فشلت دفعة واحدة فقط من دفعات الحلقة، تبقى تلك الدفعة بلغتها الأصلية بدل
+// إفشال ترجمة الحلقة بأكملها. تُرجع { results, partial } أو null لو فشل كل شيء.
 async function translateTextArray(texts, keys) {
   if (!texts.length) return null;
   const providers = [];
@@ -200,20 +238,31 @@ async function translateTextArray(texts, keys) {
   if (keys.openaiKey) providers.push({ name: 'openai', key: keys.openaiKey });
   if (!providers.length) return null;
 
-  const CHUNK = 80;
-  const results = [];
-  for (let i = 0; i < texts.length; i += CHUNK) {
-    const chunk = texts.slice(i, i + CHUNK);
-    let done = null;
+  const CHUNK = 50;
+  const chunks = [];
+  for (let i = 0; i < texts.length; i += CHUNK) chunks.push(texts.slice(i, i + CHUNK));
+
+  console.log(`[translateTextArray] بدء ترجمة ${texts.length} سطر عبر ${chunks.length} دفعة بالتوازي`);
+  const t0 = Date.now();
+
+  const chunkResults = await Promise.all(chunks.map(async (chunk, idx) => {
     for (const p of providers) {
-      done = await translateChunkJSON(chunk, p.name, p.key);
-      if (done && Array.isArray(done) && done.length === chunk.length) break;
-      done = null;
+      const done = await translateChunkJSON(chunk, p.name, p.key);
+      if (done && Array.isArray(done) && done.length === chunk.length) {
+        return { ok: true, texts: done };
+      }
     }
-    if (!done) return null;
-    results.push(...done);
-  }
-  return results;
+    console.log(`[translateTextArray] الدفعة ${idx + 1}/${chunks.length} فشلت مع كل المزودين المتاحين، ستبقى بلغتها الأصلية`);
+    return { ok: false, texts: chunk };
+  }));
+
+  console.log(`[translateTextArray] انتهت كل الدفعات خلال ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+
+  if (!chunkResults.some(r => r.ok)) return null;
+  return {
+    results: chunkResults.flatMap(r => r.texts),
+    partial: chunkResults.some(r => !r.ok)
+  };
 }
 
 // ============= التخزين المؤقت، الجسر المزدوج، وأفلام الأنمي =============
@@ -547,9 +596,11 @@ app.get(['/', '/configure'], (req, res) => {
         </div>
 
         <button class="btn-install" onclick="install()">تثبيت / تحديث في Nuvio</button>
-        <button class="btn-copy" onclick="copyLink()">📋 نسخ رابط الإضافة</button>
-        <div class="link-box" id="linkBox"><input type="text" id="linkOutput" readonly onclick="this.select()"></div>
-        <div id="copyMsg" class="copy-msg"></div>
+        <div id="copySection" style="display:none;">
+          <button class="btn-copy" onclick="copyLink()">📋 نسخ رابط الإضافة</button>
+          <div class="link-box" id="linkBox"><input type="text" id="linkOutput" readonly onclick="this.select()"></div>
+          <div id="copyMsg" class="copy-msg"></div>
+        </div>
       </div>
 
       <script>
@@ -576,6 +627,7 @@ app.get(['/', '/configure'], (req, res) => {
           return window.location.origin + '/' + config + '/manifest.json';
         }
         function install() {
+          document.getElementById('copySection').style.display = 'block';
           window.location.href = 'nuvio://' + buildManifestUrl().replace(/^https?:\\/\\//, '');
         }
         async function copyLink() {
@@ -606,15 +658,20 @@ app.get(['/', '/configure'], (req, res) => {
 app.get(['/manifest.json', '/:config/manifest.json'], (req, res) => res.json(manifest));
 
 // ============= الترجمة الفورية =============
-app.get(['/translate', '/:config/translate', '/translate/trans.ass', '/:config/translate/trans.ass'], async (req, res) => {
+app.get(['/translate', '/:config/translate', '/translate/:filename', '/:config/translate/:filename'], async (req, res) => {
   const subUrl = req.query.subUrl; if (!subUrl) return res.status(400).send("No URL");
   const keys = req.params.config ? decodeConfig(req.params.config) : req.query;
+  const reqId = Math.random().toString(36).slice(2, 8);
+  const tStart = Date.now();
   let text;
   try {
     const r = await axios.get(subUrl, { responseType: 'arraybuffer', timeout: 12000, headers: {'User-Agent': USER_AGENTS[0]} });
     const buf = Buffer.from(r.data);
     text = safeDecodeText(buf);
-  } catch (err) { return res.redirect(subUrl); }
+  } catch (err) {
+    logErr(`translate:${reqId}:sourceFetch`, err);
+    return res.redirect(subUrl);
+  }
 
   const isAss = isAssUrl(subUrl) || /^\uFEFF?\[Script Info\]/im.test(text);
   let outText = text;
@@ -623,22 +680,28 @@ app.get(['/translate', '/:config/translate', '/translate/trans.ass', '/:config/t
     const cues = assP ? assP.dialogues : (parseSrt(text) || []);
     if (cues.length > 0) {
       const masked = cues.map(c => { const m = maskTags(c.text); return { txt: c.text, masked: m.masked, tags: m.tags }; });
-      const trans = await translateTextArray(masked.map(c => c.masked), keys);
+      const transResult = await translateTextArray(masked.map(c => c.masked), keys);
 
-      if (trans && trans.length === cues.length) {
+      if (transResult && transResult.results.length === cues.length) {
+        const trans = transResult.results;
+        // \u200F (RLM) في بداية كل سطر عربي مُترجم يمنع محرك عرض الترجمة من "عكس"
+        // مكان علامات الترقيم اللاتينية المتبقية (-, !, .) بصريًا بسبب اختلاط RTL/LTR
         if (assP) {
           const lines = [...assP.headerLines];
-          assP.dialogues.forEach((d, i) => lines.push(`${d.prefix}: ${d.before.join(',')},${unmaskTags(trans[i], masked[i].tags)}`));
+          assP.dialogues.forEach((d, i) => lines.push(`${d.prefix}: ${d.before.join(',')},\u200F${unmaskTags(trans[i], masked[i].tags)}`));
           outText = lines.join('\n') + '\n';
         } else {
-          outText = buildAssFromCues(cues.map((c, i) => ({ start: c.start, end: c.end, text: unmaskTags(trans[i], masked[i].tags) })));
+          outText = buildAssFromCues(cues.map((c, i) => ({ start: c.start, end: c.end, text: '\u200F' + unmaskTags(trans[i], masked[i].tags) })));
         }
+        if (transResult.partial) console.log(`[translate:${reqId}] نتيجة جزئية: بعض الأسطر بقيت بلغتها الأصلية`);
       } else {
+        console.log(`[translate:${reqId}] فشلت الترجمة بالكامل مع كل المزودين`);
         const errMsg = "[النظام] عذراً، فشلت الترجمة الفورية بسبب ضغط الخوادم أو رفض الاستجابة.";
-        outText = (assP ? assP.headerLines.join('\n') : ASS_DEFAULT_HEADER) + `\nDialogue: 0,0:00:00.00,0:00:10.00,Default,,0,0,0,,${errMsg}\n`;
+        outText = buildRepeatingErrorAss(assP ? assP.headerLines : ASS_DEFAULT_HEADER.split('\n'), errMsg);
       }
     }
-  } catch (e) { logErr('translate', e); }
+  } catch (e) { logErr(`translate:${reqId}`, e); }
+  console.log(`[translate:${reqId}] انتهى الطلب خلال ${((Date.now() - tStart) / 1000).toFixed(1)}s`);
   res.setHeader('Content-Type', 'text/x-ssa; charset=utf-8'); res.send(outText);
 });
 
@@ -687,7 +750,7 @@ app.get(['/subtitles/:type/:id.json', '/subtitles/:type/:id/:extra.json', '/:con
   let rawSubs = results.flat();
   const host = req.get('host'), protocol = req.protocol;
 
-  subdlZips.forEach(z => rawSubs.push({ ...z, url: `${protocol}://${host}/subdl-extract?zipUrl=${encodeURIComponent(z.zipUrl)}` }));
+  subdlZips.forEach(z => rawSubs.push({ ...z, url: `${protocol}://${host}/subdl-extract/${slugify(z.origName)}.ass?zipUrl=${encodeURIComponent(z.zipUrl)}` }));
 
   console.log(`[subtitles] ${type}/${targetId} -> tIds:[${tIds.join(', ')}] | نتائج البحث بالمعرف: ${rawSubs.length}`);
 
@@ -699,7 +762,7 @@ app.get(['/subtitles/:type/:id.json', '/subtitles/:type/:id/:extra.json', '/:con
       fetchSubDLByName(animeInfo.title, config.subdlKey)
     ]);
     rawSubs.push(...byNameOS);
-    byNameSubDL.forEach(z => rawSubs.push({ ...z, url: `${protocol}://${host}/subdl-extract?zipUrl=${encodeURIComponent(z.zipUrl)}` }));
+    byNameSubDL.forEach(z => rawSubs.push({ ...z, url: `${protocol}://${host}/subdl-extract/${slugify(z.origName)}.ass?zipUrl=${encodeURIComponent(z.zipUrl)}` }));
     console.log(`[fallback] نتائج البحث بالاسم: ${byNameOS.length + byNameSubDL.length}`);
   }
 
@@ -736,7 +799,7 @@ app.get(['/subtitles/:type/:id.json', '/subtitles/:type/:id/:extra.json', '/:con
     const base = req.params.config ? `${protocol}://${host}/${req.params.config}` : `${protocol}://${host}`;
     enSubs.slice(0, 5).forEach((c, idx) => {
       const aiLabel = `${c.origName} • ${sourceLabelOf(c._source)} • trans • ASS`;
-      aiSubs.push({ id: `trans_${idx+1}`, url: `${base}/translate/trans.ass?subUrl=${encodeURIComponent(c.url)}`, lang: 'ara', name: aiLabel, title: aiLabel });
+      aiSubs.push({ id: `trans_${idx+1}`, url: `${base}/translate/${slugify(c.origName)}-trans.ass?subUrl=${encodeURIComponent(c.url)}`, lang: 'ara', name: aiLabel, title: aiLabel });
     });
   }
 
@@ -745,7 +808,7 @@ app.get(['/subtitles/:type/:id.json', '/subtitles/:type/:id/:extra.json', '/:con
   res.json({ subtitles: [...limitedAr.map(({_ext,_source,origName,...rest})=>rest), ...aiSubs] });
 });
 
-app.get('/subdl-extract', async (req, res) => {
+app.get(['/subdl-extract', '/subdl-extract/:filename'], async (req, res) => {
   try {
     const r = await axios.get(req.query.zipUrl, { responseType: 'arraybuffer', timeout: 12000, headers: {'User-Agent': USER_AGENTS[0]} });
     const z = new AdmZip(Buffer.from(r.data)), entries = z.getEntries().filter(e => /\.(srt|ass|ssa|vtt)$/i.test(e.entryName));
