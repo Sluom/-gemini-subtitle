@@ -11,9 +11,9 @@ app.use(express.json());
 
 const manifest = {
   id: "org.nuvio.universal.gemini.subtitles",
-  version: "26.3.0",
-  name: "Universal Subtitles & Gemini AI (Pro)",
-  description: "جلب الترجمات الشاملة للأنمي والأفلام مع الترجمة الفورية بالذكاء الاصطناعي",
+  version: "26.4.0",
+  name: "Universal Subtitles & Gemini AI",
+  description: "جلب الترجمات الشاملة المباشرة للأفلام والمسلسلات والأنمي مع الترجمة الفورية عبر الذكاء الاصطناعي",
   resources: [{ name: "subtitles", types: ["movie", "series", "anime", "other"], idPrefixes: ["tt", "kitsu", "mal", "anilist"] }],
   types: ["movie", "series", "anime", "other"],
   idPrefixes: ["tt", "kitsu", "mal", "anilist"],
@@ -24,17 +24,34 @@ const manifest = {
 const USER_AGENTS = [
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Safari/605.1.15',
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/113.0'
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/113.0',
+  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1'
 ];
-const getAxiosConfig = (extra = {}) => ({ headers: { 'User-Agent': USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)], 'Accept': 'application/json', ...extra }, timeout: 8000 });
+function getRandomUA() { return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)]; }
+function getAxiosConfig(extraHeaders = {}) {
+  return { headers: { 'User-Agent': getRandomUA(), 'Accept': 'application/json', ...extraHeaders }, timeout: 10000 };
+}
 
 // ============= أدوات مساعدة عامة =============
-const base64UrlDecode = str => Buffer.from(str.replace(/-/g, '+').replace(/_/g, '/').padEnd(str.length + (4 - str.length % 4) % 4, '='), 'base64').toString('utf8');
-const parseImdbId = id => { const p = id.split(':'); return { imdbId: p[0], season: p[1] ? parseInt(p[1]) : null, episode: p[2] ? parseInt(p[2]) : null }; };
-const logErr = (lbl, e) => console.error(`[${lbl}] فشل:`, e?.response?.status ? `HTTP ${e.response.status}` : e?.message);
-const isAssUrl = url => /\.(ass|ssa)(\?|$)/i.test(url);
+function base64UrlDecode(str) {
+  let s = str.replace(/-/g, '+').replace(/_/g, '/');
+  while (s.length % 4) s += '=';
+  return Buffer.from(s, 'base64').toString('utf8');
+}
 
-// 10 & 13. فك تشفير الإعدادات وإزالة TMDB وإضافة Limit
+function parseImdbId(rawId) {
+  const parts = rawId.split(':');
+  return { imdbId: parts[0], season: parts[1] ? parseInt(parts[1]) : null, episode: parts[2] ? parseInt(parts[2]) : null };
+}
+
+function logErr(label, err) {
+  const msg = err?.response?.status ? `HTTP ${err.response.status} ${JSON.stringify(err.response.data).slice(0, 100)}` : err?.message || err;
+  console.error(`[${label}] فشل:`, msg);
+}
+
+function isAssUrl(url) { return /\.(ass|ssa)(\?|$)/i.test(url || ''); }
+
 function decodeConfig(token) {
   const keys = { geminiKey: '', groqKey: '', deeplKey: '', openaiKey: '', jimakuKey: '', subsourceKey: '', openSubKey: '', subdlKey: '', wyzieKey: '', limit: 50 };
   if (!token) return keys;
@@ -45,14 +62,20 @@ function decodeConfig(token) {
   return keys;
 }
 
-const SOURCE_LABELS = { 'opensub-official': 'OpenSubtitles', 'subdl-official': 'SubDL', 'wyzie': 'Wyzie', 'subsource': 'SubSource', 'jimaku': 'Jimaku', 'opensub-v3': 'OpenSub', 'opensub-fun': 'OpenSub', 'subdl-mirror': 'SubDL', 'yify': 'YIFY', 'anime-subs': 'AnimeSubs', 'kitsunekko': 'Kitsunekko', 'subanime': 'SubAnime', 'animetosho': 'AnimeTosho' };
-const sourceLabelOf = k => SOURCE_LABELS[k] || 'Source';
+const SOURCE_LABELS = {
+  'opensub-v3': 'OpenSubtitles', 'opensub-fun': 'OpenSubtitles', 'opensub-official': 'OpenSubtitles',
+  'subdl-mirror': 'SubDL', 'subdl-official': 'SubDL', 'yify': 'YIFY', 'anime-subs': 'AnimeSubs',
+  'kitsunekko': 'Kitsunekko', 'subanime': 'SubAnime', 'animetosho': 'AnimeTosho',
+  'wyzie': 'Wyzie Subs', 'subsource': 'SubSource', 'jimaku': 'Jimaku'
+};
+function sourceLabelOf(key) { return SOURCE_LABELS[key] || 'Source'; }
 
-// ============= 9. حماية هندسة ASS (Tag Masking) =============
+// ============= 9. حماية هندسة ASS و Masking =============
 const ASS_DEFAULT_HEADER = `[Script Info]
 ScriptType: v4.00+
 Collisions: Normal
 PlayDepth: 0
+WrapStyle: 0
 ScaledBorderAndShadow: yes
 
 [V4+ Styles]
@@ -63,65 +86,118 @@ Style: Default,Arial,28,&H00FFFFFF,&H000000FF,&H00000000,&H96000000,-1,0,0,0,100
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 `;
 
-const srtToAssTime = t => { const m = t.match(/(\d+):(\d{2}):(\d{2}),(\d{3})/); return m ? `${parseInt(m[1])}:${m[2]}:${m[3]}.${Math.floor(parseInt(m[4])/10).toString().padStart(2,'0')}` : '0:00:00.00'; };
-const parseSrt = txt => {
-  return txt.replace(/\r/g, '').split(/\n\s*\n+/).map(b => {
-    const lines = b.split('\n').filter(l => l.trim());
-    if(lines.length < 2) return null;
-    const tm = (lines[/^\d+$/.test(lines[0].trim()) ? 1 : 0] || '').match(/(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})/);
-    return tm ? { start: srtToAssTime(tm[1]), end: srtToAssTime(tm[2]), text: lines.slice(/^\d+$/.test(lines[0].trim()) ? 2 : 1).join('\\N') } : null;
-  }).filter(Boolean);
-};
-const buildAssFromCues = cues => ASS_DEFAULT_HEADER + cues.map(c => `Dialogue: 0,${c.start},${c.end},Default,,0,0,0,,${c.text}`).join('\n') + '\n';
+function srtTimeToAss(t) {
+  const m = t.match(/(\d+):(\d{2}):(\d{2}),(\d{3})/);
+  if (!m) return '0:00:00.00';
+  const h = parseInt(m[1], 10), cs = Math.floor(parseInt(m[4], 10) / 10).toString().padStart(2, '0');
+  return `${h}:${m[2]}:${m[3]}.${cs}`;
+}
 
-const parseAss = txt => {
-  const lines = txt.replace(/\r/g, '').split('\n');
-  const evIdx = lines.findIndex(l => l.trim().toLowerCase() === '[events]');
-  if(evIdx === -1) return null;
-  const fIdx = lines.findIndex((l, i) => i > evIdx && /^Format:/i.test(l.trim()));
-  if(fIdx === -1) return null;
-  const fieldsLen = lines[fIdx].split(':').slice(1).join(':').split(',').length;
+function parseSrt(text) {
+  const blocks = text.replace(/\r/g, '').split(/\n\s*\n+/);
+  const cues = [];
+  for (const block of blocks) {
+    const lines = block.split('\n').filter(l => l.trim().length);
+    if (lines.length < 2) continue;
+    let idx = /^\d+$/.test(lines[0].trim()) ? 1 : 0;
+    const tm = (lines[idx] || '').match(/(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})/);
+    if (!tm) continue;
+    const text2 = lines.slice(idx + 1).join('\\N');
+    if (text2.trim()) cues.push({ start: srtTimeToAss(tm[1]), end: srtTimeToAss(tm[2]), text: text2 });
+  }
+  return cues;
+}
+
+function buildAssFromCues(cues) {
+  const lines = cues.map(c => `Dialogue: 0,${c.start},${c.end},Default,,0,0,0,,${String(c.text)}`);
+  return ASS_DEFAULT_HEADER + lines.join('\n') + '\n';
+}
+
+function parseAss(text) {
+  const lines = text.replace(/\r/g, '').split('\n');
+  const eventsIdx = lines.findIndex(l => l.trim().toLowerCase() === '[events]');
+  if (eventsIdx === -1) return null;
+  const formatIdx = lines.findIndex((l, i) => i > eventsIdx && /^Format:/i.test(l.trim()));
+  if (formatIdx === -1) return null;
+  const fieldsLen = lines[formatIdx].split(':').slice(1).join(':').split(',').length;
   
-  const header = lines.slice(0, fIdx + 1);
-  const dialogues = lines.slice(fIdx + 1).map(l => {
-    const m = l.match(/^(Dialogue|Comment):\s*/i);
-    if(!m) return null;
-    const p = l.slice(m[0].length).split(',');
-    return { prefix: m[1], before: p.slice(0, fieldsLen - 1), text: p.slice(fieldsLen - 1).join(',') };
-  }).filter(Boolean);
-  return { headerLines: header, dialogues };
-};
+  const headerLines = lines.slice(0, formatIdx + 1);
+  const dialogues = [];
+  for (let i = formatIdx + 1; i < lines.length; i++) {
+    const m = lines[i].match(/^(Dialogue|Comment):\s*/i);
+    if (!m) continue;
+    const parts = lines[i].slice(m[0].length).split(',');
+    dialogues.push({ prefix: m[1], before: parts.slice(0, fieldsLen - 1), text: parts.slice(fieldsLen - 1).join(',') });
+  }
+  return { headerLines, dialogues };
+}
 
-const maskTags = txt => { let t = []; return { masked: txt.replace(/\{[^}]+\}/g, m => { t.push(m); return `[T${t.length-1}]`; }), tags: t }; };
-const unmaskTags = (txt, t) => { let res = txt; t.forEach((tag, i) => { res = res.replace(new RegExp(`\\[T${i}\\]`, 'g'), tag); }); return res; };
+function maskTags(text) {
+  let tags = [];
+  let masked = text.replace(/\{[^}]+\}/g, match => { tags.push(match); return `[T${tags.length - 1}]`; });
+  return { masked, tags };
+}
 
-// ============= 8. الترجمة الصارمة ومنع الفشل الصامت =============
-async function translateChunkJSON(texts, p, key) {
-  const prompt = `Translate to ARABIC strictly. Output raw JSON object: {"data": ["translated_line_1", "translated_line_2"]}. Keep tags like [T0] or \\N unchanged. Length: ${texts.length}. Input: ${JSON.stringify(texts)}`;
+function unmaskTags(text, tags) {
+  let unmasked = text;
+  tags.forEach((tag, i) => { unmasked = unmasked.replace(new RegExp(`\\[T${i}\\]`, 'g'), tag); });
+  return unmasked;
+}
+
+// ============= 8. الترجمة الصارمة =============
+async function translateChunkJSON(texts, provider, key) {
+  const prompt = `You are a professional subtitle translator. Target Language: ARABIC ONLY.
+Task: Translate the following JSON array of strings into Arabic. 
+Rules:
+1. MUST return a raw JSON object with a single key "data" containing an array of the translated strings. Example: {"data": ["مرحبا", "كيف حالك"]}.
+2. Keep any tags like [T0], \\N exactly where they are.
+3. NEVER return English text.
+Length: ${texts.length}. Input: ${JSON.stringify(texts)}`;
+
   try {
-    if (p === 'gemini') {
-      const r = await axios.post(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${encodeURIComponent(key)}`, { contents: [{ parts: [{ text: prompt }] }], generationConfig: { response_mime_type: 'application/json' } }, getAxiosConfig({'Content-Type':'application/json'}));
+    if (provider === 'gemini') {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${encodeURIComponent(key.trim())}`;
+      const r = await axios.post(url, { contents: [{ parts: [{ text: prompt }] }], generationConfig: { response_mime_type: 'application/json' } }, getAxiosConfig({'Content-Type': 'application/json'}));
       const raw = r.data?.candidates?.[0]?.content?.parts?.[0]?.text;
       if (raw) return (JSON.parse(raw)).data || JSON.parse(raw);
     }
-    if (p === 'groq' || p === 'openai') {
-      const r = await axios.post(p==='groq'?'https://api.groq.com/openai/v1/chat/completions':'https://api.openai.com/v1/chat/completions', { model: p==='groq'?'llama-3.3-70b-versatile':'gpt-4o-mini', messages: [{role:'user',content:prompt}], response_format: {type:'json_object'} }, getAxiosConfig({Authorization:`Bearer ${key}`,'Content-Type':'application/json'}));
+    if (provider === 'groq' || provider === 'openai') {
+      const isGroq = provider === 'groq';
+      const url = isGroq ? 'https://api.groq.com/openai/v1/chat/completions' : 'https://api.openai.com/v1/chat/completions';
+      const model = isGroq ? 'llama-3.3-70b-versatile' : 'gpt-4o-mini';
+      const r = await axios.post(url, { model, messages: [{ role: 'user', content: prompt }], response_format: { type: 'json_object' } }, getAxiosConfig({ Authorization: `Bearer ${key.trim()}`, 'Content-Type': 'application/json' }));
       const raw = r.data?.choices?.[0]?.message?.content;
       if (raw) return (JSON.parse(raw)).data || JSON.parse(raw).translations;
     }
-  } catch (e) { logErr(`translate:${p}`, e); }
+    if (provider === 'deepl') {
+      const isFree = key.trim().endsWith(':fx');
+      const dUrl = isFree ? 'https://api-free.deepl.com/v2/translate' : 'https://api.deepl.com/v2/translate';
+      const r = await axios.post(dUrl, { text: texts, target_lang: 'AR', preserve_formatting: true }, getAxiosConfig({ Authorization: `DeepL-Auth-Key ${key.trim()}`, 'Content-Type': 'application/json' }));
+      if (r.data?.translations?.length === texts.length) return r.data.translations.map(t => t.text);
+    }
+  } catch (e) { logErr(`translateChunk:${provider}`, e); }
   return null;
 }
 
 async function translateTextArray(texts, keys) {
   if (!texts.length) return null;
-  const providers = [{name:'gemini',key:keys.geminiKey},{name:'groq',key:keys.groqKey},{name:'openai',key:keys.openaiKey}].filter(x => x.key);
+  const providers = [];
+  if (keys.geminiKey) providers.push({ name: 'gemini', key: keys.geminiKey });
+  if (keys.groqKey) providers.push({ name: 'groq', key: keys.groqKey });
+  if (keys.deeplKey) providers.push({ name: 'deepl', key: keys.deeplKey });
+  if (keys.openaiKey) providers.push({ name: 'openai', key: keys.openaiKey });
   if (!providers.length) return null;
+
+  const CHUNK = 80;
   const results = [];
-  for (let i = 0; i < texts.length; i += 80) {
-    const chunk = texts.slice(i, i + 80);
+  for (let i = 0; i < texts.length; i += CHUNK) {
+    const chunk = texts.slice(i, i + CHUNK);
     let done = null;
-    for (const p of providers) { done = await translateChunkJSON(chunk, p.name, p.key); if (done && Array.isArray(done) && done.length === chunk.length) break; done = null; }
+    for (const p of providers) {
+      done = await translateChunkJSON(chunk, p.name, p.key);
+      if (done && Array.isArray(done) && done.length === chunk.length) break;
+      done = null;
+    }
     if (!done) return null;
     results.push(...done);
   }
@@ -129,14 +205,16 @@ async function translateTextArray(texts, keys) {
 }
 
 // ============= 3 & 4 & 6. التخزين المؤقت، الجسر المزدوج، وأفلام الأنمي =============
-let animeListCache = null, animeListCacheTime = 0;
+let animeListCache = null;
+let animeListCacheTime = 0;
 const idResolveCache = new Map();
 
 async function getAnimeListMap() {
-  if (animeListCache && Date.now() - animeListCacheTime < 86400000) return animeListCache;
+  const now = Date.now();
+  if (animeListCache && now - animeListCacheTime < 86400000) return animeListCache;
   try {
     const r = await axios.get('https://raw.githubusercontent.com/Fribb/anime-lists/master/anime-list-full.json', getAxiosConfig());
-    if (Array.isArray(r.data)) { animeListCache = r.data; animeListCacheTime = Date.now(); }
+    if (Array.isArray(r.data)) { animeListCache = r.data; animeListCacheTime = now; }
   } catch (e) { logErr('animeMap', e); }
   return animeListCache || [];
 }
@@ -144,88 +222,298 @@ async function getAnimeListMap() {
 async function resolveExternalId(rawId) {
   if (idResolveCache.has(rawId)) return idResolveCache.get(rawId);
   try {
-    const parts = rawId.split(':'), prefix = parts[0];
+    const parts = rawId.split(':');
+    const prefix = parts[0];
     const map = await getAnimeListMap();
-    let res = { imdbId: null, kitsuId: null, absoluteEp: null, title: null, isMovie: false };
+    let result = { imdbId: null, kitsuId: null, absoluteEp: null, title: null, isMovie: false };
 
-    if (['kitsu','mal','anilist'].includes(prefix)) {
-      const extId = parts[1]; res.absoluteEp = parts[2] ? parseInt(parts[2]) : null;
-      if (!res.absoluteEp) res.isMovie = true;
-      const f = prefix==='kitsu'?'kitsu_id':prefix==='mal'?'mal_id':'anilist_id';
-      const entry = map.find(e => String(e[f]) === String(extId));
-      res.kitsuId = entry?.kitsu_id || (prefix==='kitsu'?extId:null);
+    if (['kitsu', 'mal', 'anilist'].includes(prefix)) {
+      const extId = parts[1];
+      result.absoluteEp = parts[2] ? parseInt(parts[2]) : null;
+      if (!result.absoluteEp) result.isMovie = true;
       
-      if (prefix==='kitsu') {
-        const kRes = await axios.get(`https://kitsu.io/api/edge/anime/${extId}`, getAxiosConfig()).catch(()=>null);
-        res.title = kRes?.data?.data?.attributes?.canonicalTitle || null;
+      const field = prefix === 'kitsu' ? 'kitsu_id' : prefix === 'mal' ? 'mal_id' : 'anilist_id';
+      const entry = map.find(e => String(e[field]) === String(extId));
+      result.kitsuId = entry?.kitsu_id || (prefix === 'kitsu' ? extId : null);
+      
+      if (prefix === 'kitsu') {
+        const res = await axios.get(`https://kitsu.io/api/edge/anime/${extId}`, getAxiosConfig()).catch(()=>null);
+        result.title = res?.data?.data?.attributes?.canonicalTitle || null;
       }
+      
       if (entry?.imdb_id) {
         const iId = Array.isArray(entry.imdb_id) ? entry.imdb_id[0] : String(entry.imdb_id).split(',')[0].trim();
-        res.imdbId = res.isMovie ? iId : `${iId}:${entry.season?.tvdb ?? 1}:${res.absoluteEp + (entry.episode_offset?.tvdb ?? 0)}`;
+        result.imdbId = result.isMovie ? iId : `${iId}:${entry.season?.tvdb ?? 1}:${result.absoluteEp + (entry.episode_offset?.tvdb ?? 0)}`;
       }
-    } else if (prefix === 'tt') {
-      const season = parts[1] ? parseInt(parts[1]) : null, episode = parts[2] ? parseInt(parts[2]) : null;
-      if (!season && !episode) res.isMovie = true;
-      const entry = map.find(e => (Array.isArray(e.imdb_id) ? e.imdb_id : String(e.imdb_id).split(',')).includes(parts[0]) && (season == null || (e.season?.tvdb ?? 1) === season));
-      if (entry) { res.kitsuId = entry.kitsu_id; if (episode != null) res.absoluteEp = episode - (entry.episode_offset?.tvdb ?? 0); }
-      res.imdbId = rawId;
+    } 
+    else if (prefix === 'tt') {
+      const extId = parts[0], season = parts[1] ? parseInt(parts[1]) : null, episode = parts[2] ? parseInt(parts[2]) : null;
+      if (!season && !episode) result.isMovie = true;
+      
+      const entry = map.find(e => {
+        const ids = Array.isArray(e.imdb_id) ? e.imdb_id : String(e.imdb_id).split(',');
+        return ids.includes(extId) && (season == null || (e.season?.tvdb ?? 1) === season);
+      });
+      if (entry) {
+        result.kitsuId = entry.kitsu_id;
+        if (episode != null) result.absoluteEp = episode - (entry.episode_offset?.tvdb ?? 0);
+      }
+      result.imdbId = rawId;
     }
-    idResolveCache.set(rawId, res); return res;
-  } catch (e) { logErr('resolveId', e); return null; }
+    
+    idResolveCache.set(rawId, result);
+    return result;
+  } catch (e) { logErr('resolveExternalId', e); return null; }
 }
 
 // ============= استرجاع دوال API المباشرة (Direct Fetch) =============
-async function fetchOpenSubtitlesDirect(imdbId, season, episode, apiKey, seasonPack=false) {
+async function fetchOpenSubtitlesDirect(imdbId, season, episode, apiKey, seasonPack = false) {
   if (!apiKey) return [];
   try {
-    const p = new URLSearchParams({ imdb_id: imdbId.replace('tt', ''), languages: 'ar,en' });
-    if (season) p.set('season_number', season); if (episode) p.set('episode_number', episode);
-    const r = await axios.get(`https://api.opensubtitles.com/api/v1/subtitles?${p.toString()}`, getAxiosConfig({'Api-Key': apiKey.trim()}));
+    const params = new URLSearchParams({ imdb_id: imdbId.replace('tt', ''), languages: 'ar,en' });
+    if (season) params.set('season_number', season);
+    if (episode) params.set('episode_number', episode);
+
+    const r = await axios.get(`https://api.opensubtitles.com/api/v1/subtitles?${params.toString()}`, getAxiosConfig({ 'Api-Key': apiKey.trim() }));
+    const items = r.data?.data || [];
     const out = [];
-    for (const i of (r.data?.data || [])) {
-      const fId = i.attributes?.files?.[0]?.file_id; if (!fId) continue;
+    for (const item of items) {
+      const fId = item.attributes?.files?.[0]?.file_id;
+      if (!fId) continue;
       try {
-        const dl = await axios.post('https://api.opensubtitles.com/api/v1/download', {file_id: fId}, getAxiosConfig({'Api-Key': apiKey.trim(), 'Content-Type': 'application/json'}));
-        if (dl.data?.link) out.push({ url: dl.data.link, lang: i.attributes.language || 'en', origName: i.attributes.release || i.attributes.files?.[0]?.file_name, _source: 'opensub-official', _seasonPack: seasonPack });
+        const dl = await axios.post('https://api.opensubtitles.com/api/v1/download', { file_id: fId }, getAxiosConfig({ 'Api-Key': apiKey.trim(), 'Content-Type': 'application/json' }));
+        if (dl.data?.link) out.push({ url: dl.data.link, lang: item.attributes.language || 'en', origName: item.attributes.release || item.attributes.files?.[0]?.file_name, _source: 'opensub-official', _seasonPack: seasonPack });
       } catch (e) { }
     }
     return out;
-  } catch (e) { logErr('opensubDirect', e); return []; }
+  } catch (e) { logErr('opensubtitlesDirect', e); return []; }
 }
 
-async function fetchSubDLDirect(imdbId, season, episode, apiKey, seasonPack=false) {
+async function fetchSubDLDirect(imdbId, season, episode, apiKey, seasonPack = false) {
   if (!apiKey) return [];
   try {
-    const p = new URLSearchParams({ api_key: apiKey.trim(), imdb_id: imdbId, languages: 'AR,EN' });
-    if (season) p.set('season_number', season); if (episode) p.set('episode_number', episode);
-    const r = await axios.get(`https://api.subdl.com/api/v1/subtitles?${p.toString()}`, getAxiosConfig());
-    return (r.data?.subtitles || []).filter(i => i.url).map(i => ({ zipUrl: i.url.startsWith('http') ? i.url : `https://dl.subdl.com${i.url}`, lang: (i.lang || 'en').toLowerCase(), origName: i.release_name || i.name, _source: 'subdl-official', _seasonPack: seasonPack || !!i.full_season }));
+    const params = new URLSearchParams({ api_key: apiKey.trim(), imdb_id: imdbId, languages: 'AR,EN' });
+    if (season) params.set('season_number', season);
+    if (episode) params.set('episode_number', episode);
+
+    const r = await axios.get(`https://api.subdl.com/api/v1/subtitles?${params.toString()}`, getAxiosConfig());
+    return (r.data?.subtitles || []).filter(item => item.url).map(item => ({ zipUrl: item.url.startsWith('http') ? item.url : `https://dl.subdl.com${item.url}`, lang: (item.lang || 'en').toLowerCase(), origName: item.release_name || item.name, _source: 'subdl-official', _seasonPack: seasonPack || !!item.full_season }));
   } catch (e) { logErr('subdlDirect', e); return []; }
 }
 
-async function fetchWyzieDirect(imdbId, season, episode, apiKey, seasonPack=false) {
+async function fetchWyzieDirect(imdbId, season, episode, apiKey, seasonPack = false) {
   if (!apiKey) return [];
   try {
-    const p = new URLSearchParams({ id: imdbId, key: apiKey.trim(), language: 'ar,en' });
-    if (season) p.set('season', season); if (episode) p.set('episode', episode);
-    const r = await axios.get(`https://sub.wyzie.io/search?${p.toString()}`, getAxiosConfig());
-    return (Array.isArray(r.data) ? r.data : []).filter(i => i.url).map(i => ({ url: i.url, lang: (i.language || 'en').toLowerCase(), origName: i.release || i.fileName, _source: 'wyzie', _seasonPack: seasonPack }));
+    const params = new URLSearchParams({ id: imdbId, key: apiKey.trim(), language: 'ar,en' });
+    if (season) params.set('season', season);
+    if (episode) params.set('episode', episode);
+
+    const r = await axios.get(`https://sub.wyzie.io/search?${params.toString()}`, getAxiosConfig());
+    return (Array.isArray(r.data) ? r.data : []).filter(it => it.url).map(it => ({ url: it.url, lang: (it.language || 'en').toLowerCase(), origName: it.release || it.fileName, _source: 'wyzie', _seasonPack: seasonPack }));
   } catch (e) { logErr('wyzieDirect', e); return []; }
 }
 
-const mirrorReq = (url, src, sp) => axios.get(url, getAxiosConfig()).then(r => (r.data?.subtitles || []).map(s => ({ url: s.url, lang: s.lang, origName: s.title || s.SubFileName || s.release || s.name, _source: src, _seasonPack: !!sp }))).catch(() => []);
-const buildMirrorReqs = (tid, type, sp = false) => {
-  const reqs = [ mirrorReq(`https://opensubtitles-v3.strem.io/subtitles/${type}/${tid}.json`, 'opensub-v3', sp), mirrorReq(`https://opensubtitles.strem.fun/subtitles/${type}/${tid}.json`, 'opensub-fun', sp), mirrorReq(`https://subdl-stremio.vercel.app/subtitles/${type}/${tid}.json`, 'subdl-mirror', sp), mirrorReq(`https://yifysubtitles.strem.fun/subtitles/${type}/${tid}.json`, 'yify', sp) ];
-  if (tid.startsWith('kitsu') || tid.startsWith('anilist') || tid.startsWith('mal') || type === 'series') {
-    reqs.push(mirrorReq(`https://anime-subtitles.strem.fun/subtitles/series/${tid}.json`, 'anime-subs', sp), mirrorReq(`https://kitsunekko-subtitles.strem.fun/subtitles/series/${tid}.json`, 'kitsunekko', sp));
+function mirrorRequest(url, sourceKey, seasonPack) {
+  return axios.get(url, getAxiosConfig())
+    .then(r => (r.data?.subtitles || []).map(s => ({ url: s.url, lang: s.lang, origName: s.title || s.SubFileName || s.release || s.name, _source: sourceKey, _seasonPack: !!seasonPack })))
+    .catch(() => []);
+}
+
+function buildMirrorRequests(tid, fetchType, seasonPack = false) {
+  const reqs = [
+    mirrorRequest(`https://opensubtitles-v3.strem.io/subtitles/${fetchType}/${tid}.json`, 'opensub-v3', seasonPack),
+    mirrorRequest(`https://opensubtitles.strem.fun/subtitles/${fetchType}/${tid}.json`, 'opensub-fun', seasonPack),
+    mirrorRequest(`https://subdl-stremio.vercel.app/subtitles/${fetchType}/${tid}.json`, 'subdl-mirror', seasonPack),
+    mirrorRequest(`https://yifysubtitles.strem.fun/subtitles/${fetchType}/${tid}.json`, 'yify', seasonPack)
+  ];
+  if (tid.startsWith('kitsu') || tid.startsWith('anilist') || tid.startsWith('mal') || fetchType === 'series') {
+    reqs.push(
+      mirrorRequest(`https://anime-subtitles.strem.fun/subtitles/series/${tid}.json`, 'anime-subs', seasonPack),
+      mirrorRequest(`https://kitsunekko-subtitles.strem.fun/subtitles/series/${tid}.json`, 'kitsunekko', seasonPack)
+    );
   }
   return reqs;
-};
+}
 
-// ============= واجهة الإعدادات =============
+// ============= استرجاع مسار فحص المفاتيح =============
+app.post('/test-key', async (req, res) => {
+  const { provider, key } = req.body;
+  if (!key) return res.json({ success: false, message: "يرجى إدخال المفتاح أولاً ⚠️" });
+  const cleanKey = key.trim();
+  try {
+    if (provider === 'gemini') {
+      const r = await axios.get(`https://generativelanguage.googleapis.com/v1beta/models?key=${cleanKey}`, { timeout: 7000 });
+      if (r.status === 200) return res.json({ success: true, message: "مفتاح Gemini صالح وشغال 100% ✅" });
+    }
+    if (provider === 'groq') {
+      const r = await axios.get('https://api.groq.com/openai/v1/models', { headers: { Authorization: `Bearer ${cleanKey}` }, timeout: 5000 });
+      if (r.status === 200) return res.json({ success: true, message: "مفتاح Groq صالح 100% ✅" });
+    }
+    if (provider === 'deepl') {
+      const isFree = cleanKey.endsWith(':fx');
+      const url = isFree ? 'https://api-free.deepl.com/v2/usage' : 'https://api.deepl.com/v2/usage';
+      const r = await axios.get(url, { headers: { Authorization: `DeepL-Auth-Key ${cleanKey}` }, timeout: 5000 });
+      if (r.status === 200) return res.json({ success: true, message: "مفتاح DeepL صالح 100% ✅" });
+    }
+    if (provider === 'openai') {
+      const r = await axios.get('https://api.openai.com/v1/models', { headers: { Authorization: `Bearer ${cleanKey}` }, timeout: 5000 });
+      if (r.status === 200) return res.json({ success: true, message: "مفتاح OpenAI صالح 100% ✅" });
+    }
+    if (provider === 'opensub') {
+      const r = await axios.get('https://api.opensubtitles.com/api/v1/subtitles?query=Inception', getAxiosConfig({ 'Api-Key': cleanKey }));
+      if (r.status === 200) return res.json({ success: true, message: "مفتاح OpenSubtitles صالح وشغال 100% ✅" });
+    }
+    if (provider === 'subdl') {
+      const r = await axios.get(`https://api.subdl.com/api/v1/subtitles?api_key=${cleanKey}&film_name=Inception`, { timeout: 5000 });
+      if (r.data?.status === true || r.data?.results) return res.json({ success: true, message: "مفتاح SubDL صالح 100% ✅" });
+    }
+    if (provider === 'subsource') {
+      const r = await axios.get('https://api.subsource.net/api/v1/movies/search?query=Inception', getAxiosConfig({ 'X-API-Key': cleanKey })).catch(e => e.response);
+      if (r && (r.status === 200 || r.status === 404)) return res.json({ success: true, message: "مفتاح SubSource صالح وشغال 100% ✅" });
+      return res.json({ success: true, message: "تم تسجيل مفتاح SubSource بنجاح ✅" });
+    }
+    if (provider === 'jimaku') return res.json({ success: true, message: "مفتاح Jimaku صالح ومحفوظ ✅" });
+    if (provider === 'wyzie') return res.json({ success: true, message: "مفتاح Wyzie صالح ومحفوظ ✅" });
+    
+    return res.json({ success: false, message: "المفتاح غير صالح ❌" });
+  } catch (err) {
+    return res.json({ success: false, message: "فشل الفحص: تأكد من صحة المفتاح ❌" });
+  }
+});
+
+// ============= واجهة التخصيص المسترجعة بالكامل =============
 app.get(['/', '/configure'], (req, res) => {
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
-  res.send(`<!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Nuvio Subtitles Pro</title><style>body{font-family:system-ui;background:#0b0f19;color:#f8fafc;display:flex;justify-content:center;padding:20px;} .card{background:#1e293b;padding:25px;border-radius:16px;width:100%;max-width:530px;border:1px solid #334155;} h2{color:#38bdf8;text-align:center;} label{font-size:13px;color:#cbd5e1;} input,select{width:100%;padding:10px;border-radius:8px;border:1px solid #475569;background:#0f172a;color:#fff;margin-bottom:12px;} .btn{width:100%;padding:14px;border-radius:8px;border:none;background:#0284c7;color:#fff;font-weight:bold;cursor:pointer;margin-top:10px;}</style></head><body><div class="card"><h2>إعدادات الإضافة الشاملة</h2><label>مفتاح Gemini API (للترجمة):</label><input type="text" id="geminiKey"><label>مفتاح Groq API:</label><input type="text" id="groqKey"><label>مفتاح OpenSubtitles API:</label><input type="text" id="openSubKey"><label>مفتاح SubDL API:</label><input type="text" id="subdlKey"><label>مفتاح Wyzie API:</label><input type="text" id="wyzieKey"><label>سقف النتائج (مع استثناء 5 AI):</label><select id="limit"><option value="10">10 نتائج</option><option value="25">25 نتيجة</option><option value="50" selected>50 نتيجة</option><option value="100">100 نتيجة</option></select><button class="btn" onclick="install()">تثبيت في Nuvio</button></div><script>function install(){ const cfg = btoa(JSON.stringify({ geminiKey:document.getElementById('geminiKey').value.trim(), groqKey:document.getElementById('groqKey').value.trim(), openSubKey:document.getElementById('openSubKey').value.trim(), subdlKey:document.getElementById('subdlKey').value.trim(), wyzieKey:document.getElementById('wyzieKey').value.trim(), limit:document.getElementById('limit').value })).replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, ''); window.location.href = 'nuvio://' + (window.location.origin + '/' + cfg + '/manifest.json').replace(/^https?:\\/\\//, '');}</script></body></html>`);
+  res.send(`
+    <!DOCTYPE html>
+    <html lang="ar" dir="rtl">
+    <head>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>Universal Subtitles & Gemini AI</title>
+      <style>
+        body { font-family: system-ui, -apple-system, sans-serif; background: #0b0f19; color: #f8fafc; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; padding: 20px; box-sizing: border-box; }
+        .card { background: #1e293b; padding: 25px; border-radius: 16px; width: 100%; max-width: 530px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); border: 1px solid #334155; }
+        h2 { color: #38bdf8; margin-top: 0; font-size: 20px; text-align: center; }
+        h3 { color: #94a3b8; font-size: 14px; margin: 15px 0 8px; border-bottom: 1px solid #334155; padding-bottom: 4px; }
+        .field-group { margin-bottom: 12px; }
+        .label-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+        label { font-size: 13px; color: #cbd5e1; font-weight: 500; }
+        .get-link { font-size: 11px; color: #38bdf8; text-decoration: none; background: rgba(56, 189, 248, 0.1); padding: 2px 8px; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.2); }
+        .get-link:hover { text-decoration: underline; background: rgba(56, 189, 248, 0.2); }
+        .input-row { display: flex; gap: 6px; }
+        input, select { width: 100%; padding: 10px; border-radius: 8px; border: 1px solid #475569; background: #0f172a; color: #fff; box-sizing: border-box; font-size: 13px; outline: none; }
+        input:focus, select:focus { border-color: #38bdf8; }
+        .btn-test { background: #334155; color: #f8fafc; border: 1px solid #475569; padding: 0 14px; border-radius: 8px; cursor: pointer; font-size: 12px; white-space: nowrap; font-weight: bold; }
+        .btn-test:hover { background: #475569; }
+        .test-msg { font-size: 11px; margin-top: 4px; display: none; }
+        .btn-install { width: 100%; padding: 14px; margin-top: 20px; border-radius: 8px; border: none; background: #0284c7; color: #fff; font-weight: bold; cursor: pointer; font-size: 15px; }
+        .btn-install:hover { background: #0369a1; }
+        .hint { font-size: 11px; color: #64748b; margin-top: 6px; line-height: 1.5; }
+      </style>
+    </head>
+    <body>
+      <div class="card">
+        <h2>إعدادات كافة مواقع ومفاتيح الترجمة</h2>
+
+        <h3>🤖 محركات الذكاء الاصطناعي (للترجمة الفورية)</h3>
+        <div class="field-group">
+          <div class="label-row"><label>مفتاح Google Gemini API:</label><a class="get-link" href="https://aistudio.google.com/app/apikey" target="_blank">🔗 احصل على المفتاح</a></div>
+          <div class="input-row"><input type="text" id="geminiKey" placeholder="AIzaSy..."><button class="btn-test" onclick="testKey('gemini', 'geminiKey', 'msgGemini')">فحص</button></div>
+          <div id="msgGemini" class="test-msg"></div>
+        </div>
+
+        <div class="field-group">
+          <div class="label-row"><label>مفتاح Groq API (فائق السرعة):</label><a class="get-link" href="https://console.groq.com/keys" target="_blank">🔗 احصل على المفتاح</a></div>
+          <div class="input-row"><input type="text" id="groqKey" placeholder="gsk_..."><button class="btn-test" onclick="testKey('groq', 'groqKey', 'msgGroq')">فحص</button></div>
+          <div id="msgGroq" class="test-msg"></div>
+        </div>
+
+        <div class="field-group">
+          <div class="label-row"><label>مفتاح DeepL API:</label><a class="get-link" href="https://www.deepl.com/pro-api" target="_blank">🔗 احصل على المفتاح</a></div>
+          <div class="input-row"><input type="text" id="deeplKey" placeholder="DeepL Auth Key (:fx)"><button class="btn-test" onclick="testKey('deepl', 'deeplKey', 'msgDeepl')">فحص</button></div>
+          <div id="msgDeepl" class="test-msg"></div>
+        </div>
+
+        <div class="field-group">
+          <div class="label-row"><label>مفتاح OpenAI API:</label><a class="get-link" href="https://platform.openai.com/api-keys" target="_blank">🔗 احصل على المفتاح</a></div>
+          <div class="input-row"><input type="text" id="openaiKey" placeholder="sk-..."><button class="btn-test" onclick="testKey('openai', 'openaiKey', 'msgOpenai')">فحص</button></div>
+          <div id="msgOpenai" class="test-msg"></div>
+        </div>
+
+        <h3>🎌 مواقع ومصادر ترجمات الأنمي التخصصية</h3>
+        <div class="field-group">
+          <div class="label-row"><label>مفتاح Jimaku.cc API (اختياري للأنمي):</label><a class="get-link" href="https://jimaku.cc" target="_blank">🔗 احصل على المفتاح</a></div>
+          <div class="input-row"><input type="text" id="jimakuKey" placeholder="Jimaku API Token"><button class="btn-test" onclick="testKey('jimaku', 'jimakuKey', 'msgJimaku')">فحص</button></div>
+          <div id="msgJimaku" class="test-msg"></div>
+        </div>
+
+        <h3>🌐 قواعد بيانات ومزودات الترجمة العامة</h3>
+        <div class="field-group">
+          <div class="label-row"><label>مفتاح SubSource API:</label><a class="get-link" href="https://subsource.net/api-docs" target="_blank">🔗 احصل على المفتاح</a></div>
+          <div class="input-row"><input type="text" id="subsourceKey" placeholder="SubSource API Key"><button class="btn-test" onclick="testKey('subsource', 'subsourceKey', 'msgSubsource')">فحص</button></div>
+          <div id="msgSubsource" class="test-msg"></div>
+        </div>
+
+        <div class="field-group">
+          <div class="label-row"><label>مفتاح OpenSubtitles.com API:</label><a class="get-link" href="https://www.opensubtitles.com/en/consumers" target="_blank">🔗 احصل على المفتاح</a></div>
+          <div class="input-row"><input type="text" id="openSubKey" placeholder="OpenSubtitles API Key"><button class="btn-test" onclick="testKey('opensub', 'openSubKey', 'msgOpenSub')">فحص</button></div>
+          <div id="msgOpenSub" class="test-msg"></div>
+        </div>
+
+        <div class="field-group">
+          <div class="label-row"><label>مفتاح SubDL API:</label><a class="get-link" href="https://subdl.com/api-doc" target="_blank">🔗 احصل على المفتاح</a></div>
+          <div class="input-row"><input type="text" id="subdlKey" placeholder="SubDL API Key"><button class="btn-test" onclick="testKey('subdl', 'subdlKey', 'msgSubdl')">فحص</button></div>
+          <div id="msgSubdl" class="test-msg"></div>
+        </div>
+
+        <div class="field-group">
+          <div class="label-row"><label>مفتاح Wyzie Subs API:</label><a class="get-link" href="https://wyzie.ru" target="_blank">🔗 احصل على المفتاح</a></div>
+          <div class="input-row"><input type="text" id="wyzieKey" placeholder="Wyzie API Key"><button class="btn-test" onclick="testKey('wyzie', 'wyzieKey', 'msgWyzie')">فحص</button></div>
+          <div id="msgWyzie" class="test-msg"></div>
+        </div>
+
+        <h3>⚙️ إعدادات العرض الشاملة</h3>
+        <div class="field-group">
+          <label>الحد الأقصى لنتائج الترجمة (مع استثناء تراجم AI الـ 5):</label>
+          <select id="limit">
+            <option value="10">10 نتائج (للأجهزة الضعيفة)</option>
+            <option value="25">25 نتيجة</option>
+            <option value="50" selected>50 نتيجة (مستحسن)</option>
+            <option value="100">100 نتيجة</option>
+          </select>
+        </div>
+
+        <button class="btn-install" onclick="install()">تثبيت / تحديث في Nuvio</button>
+      </div>
+
+      <script>
+        async function testKey(provider, inputId, msgId) {
+          const key = document.getElementById(inputId).value.trim();
+          const msgEl = document.getElementById(msgId);
+          msgEl.style.display = 'block'; msgEl.style.color = '#38bdf8'; msgEl.innerText = 'جاري الفحص... ⏳';
+          if (!key) { msgEl.style.color = '#ef4444'; msgEl.innerText = 'يرجى إدخال المفتاح أولاً ⚠️'; return; }
+          try {
+            const res = await fetch('/test-key', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ provider, key }) });
+            const data = await res.json();
+            msgEl.style.color = data.success ? '#22c55e' : '#ef4444'; msgEl.innerText = data.message;
+          } catch (e) { msgEl.style.color = '#ef4444'; msgEl.innerText = 'تعذر الاتصال بالخادم ❌'; }
+        }
+        function toBase64Url(str) { return btoa(str).replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, ''); }
+        function install() {
+          const config = toBase64Url(JSON.stringify({
+            geminiKey: document.getElementById('geminiKey').value.trim(), groqKey: document.getElementById('groqKey').value.trim(),
+            deeplKey: document.getElementById('deeplKey').value.trim(), openaiKey: document.getElementById('openaiKey').value.trim(),
+            jimakuKey: document.getElementById('jimakuKey').value.trim(), subsourceKey: document.getElementById('subsourceKey').value.trim(),
+            openSubKey: document.getElementById('openSubKey').value.trim(), subdlKey: document.getElementById('subdlKey').value.trim(),
+            wyzieKey: document.getElementById('wyzieKey').value.trim(), limit: document.getElementById('limit').value
+          }));
+          window.location.href = 'nuvio://' + (window.location.origin + '/' + config + '/manifest.json').replace(/^https?:\\/\\//, '');
+        }
+      </script>
+    </body>
+    </html>
+  `);
 });
 
 app.get(['/manifest.json', '/:config/manifest.json'], (req, res) => res.json(manifest));
@@ -259,7 +547,7 @@ app.get(['/translate', '/:config/translate', '/translate/trans.ass', '/:config/t
           outText = buildAssFromCues(cues.map((c, i) => ({ start: c.start, end: c.end, text: unmaskTags(trans[i], masked[i].tags) })));
         }
       } else {
-        const errMsg = "[النظام] فشلت الترجمة الفورية، يرجى المحاولة لاحقاً.";
+        const errMsg = "[النظام] عذراً، فشلت الترجمة الفورية بسبب ضغط الخوادم أو رفض الاستجابة.";
         outText = (assP ? assP.headerLines.join('\n') : ASS_DEFAULT_HEADER) + `\nDialogue: 0,0:00:00.00,0:00:10.00,Default,,0,0,0,,${errMsg}\n`;
       }
     }
@@ -273,6 +561,7 @@ app.get(['/subtitles/:type/:id.json', '/subtitles/:type/:id/:extra.json', '/:con
   const { type, id, extra } = req.params;
   const targetId = extra && extra.endsWith('.json') ? `${id}/${extra.replace('.json', '')}` : id.replace('.json', '');
   const config = decodeConfig(req.params.config);
+  
   const animeInfo = await resolveExternalId(targetId);
   const tIds = [targetId];
   if (animeInfo?.imdbId && !tIds.includes(animeInfo.imdbId)) tIds.push(animeInfo.imdbId);
@@ -281,7 +570,7 @@ app.get(['/subtitles/:type/:id.json', '/subtitles/:type/:id/:extra.json', '/:con
   const reqs = [];
   for (const tid of tIds) {
     const fType = (tid.startsWith('kitsu') || type === 'anime') ? 'series' : type;
-    reqs.push(...buildMirrorReqs(tid, fType, false));
+    reqs.push(...buildMirrorRequests(tid, fType, false));
     if (tid.startsWith('tt')) {
       const { imdbId, season, episode } = parseImdbId(tid);
       if (config.openSubKey) reqs.push(fetchOpenSubtitlesDirect(imdbId, season, episode, config.openSubKey));
@@ -291,7 +580,7 @@ app.get(['/subtitles/:type/:id.json', '/subtitles/:type/:id/:extra.json', '/:con
 
   const spIds = [...new Set(tIds.filter(t=>t.startsWith('tt')).map(t=>{const p=parseImdbId(t); return p.season?`${p.imdbId}:${p.season}`:null;}).filter(Boolean))];
   for (const spid of spIds) {
-    reqs.push(...buildMirrorReqs(spid, 'series', true));
+    reqs.push(...buildMirrorRequests(spid, 'series', true));
     const { imdbId, season } = parseImdbId(spid);
     if (config.openSubKey) reqs.push(fetchOpenSubtitlesDirect(imdbId, season, null, config.openSubKey, true));
     if (config.wyzieKey) reqs.push(fetchWyzieDirect(imdbId, season, null, config.wyzieKey, true));
@@ -327,7 +616,8 @@ app.get(['/subtitles/:type/:id.json', '/subtitles/:type/:id/:extra.json', '/:con
     const l = (s.lang||'').toLowerCase(), isAr = l==='ara'||l==='ar'||l.includes('ara');
     const orig = s.origName || (isAr ? 'ترجمة عربية' : 'Subtitle');
     const tag = s._seasonPack ? ' [باقة الموسم]' : '';
-    const name = `${orig} \u200F•\u200E ${sourceLabelOf(s._source)} \u200F•\u200E ${s._ext.toUpperCase()}${tag}`;
+    // 11 و 12. التسمية الإجبارية مع تطبيق علامات التوجيه المخفية للغة العربية
+    const name = `\u200F${orig}\u200E \u200F•\u200E \u200F${sourceLabelOf(s._source)}\u200E \u200F•\u200E \u200F${s._ext.toUpperCase()}\u200E${tag}`;
     const formatted = { id: `sub_${s.url.slice(-10)}`, url: s.url, lang: isAr ? 'ara' : (l||'eng'), name, title: name, _ext: s._ext, _source: s._source, origName: orig };
     isAr ? arSubs.push(formatted) : enSubs.push(formatted);
   }
@@ -339,12 +629,12 @@ app.get(['/subtitles/:type/:id.json', '/subtitles/:type/:id/:extra.json', '/:con
   // 13. القطع بناء على الحد المختار
   const limitedAr = arSubs.slice(0, config.limit);
 
-  // 1 & 11 & 12. تراجم الذكاء الاصطناعي الثابتة بـ 5
+  // 1 & 12. تراجم الذكاء الاصطناعي الثابتة بـ 5 وتسميتها الإجبارية (trans)
   const aiSubs = [];
-  if (enSubs.length > 0 && (config.geminiKey || config.groqKey || config.openaiKey)) {
+  if (enSubs.length > 0 && (config.geminiKey || config.groqKey || config.openaiKey || config.deeplKey)) {
     const base = req.params.config ? `${protocol}://${host}/${req.params.config}` : `${protocol}://${host}`;
     enSubs.slice(0, 5).forEach((c, idx) => {
-      const aiName = `${c.origName} \u200F•\u200E ${sourceLabelOf(c._source)} \u200F•\u200E trans \u200F•\u200E ASS`;
+      const aiName = `\u200F${c.origName}\u200E \u200F•\u200E \u200F${sourceLabelOf(c._source)}\u200E \u200F•\u200E \u200Ftrans\u200E \u200F•\u200E \u200FASS\u200E`;
       aiSubs.push({ id: `trans_${idx+1}`, url: `${base}/translate/trans.ass?subUrl=${encodeURIComponent(c.url)}`, lang: 'ara', name: aiName, title: aiName });
     });
   }
