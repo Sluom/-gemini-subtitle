@@ -712,17 +712,16 @@ app.get(['/subtitles/:type/:id.json', '/subtitles/:type/:id/:extra.json', '/:con
   }
   rawSubs = Array.from(uMap.values());
 
-  // ملاحظة مهمة: كثير من مشغّلات Stremio (ومنها Nuvio) تعرض حقل "lang" حرفيًا كتسمية
-  // الترجمة في القائمة، وتتجاهل حقلي name/title تمامًا لأنهما ليسا جزءًا من المواصفة
-  // الرسمية. لهذا نضع التسمية الكاملة (الاسم + المصدر + الصيغة) داخل lang نفسه
-  // حتى تظهر فعليًا، بدل الاعتماد فقط على name/title كما كان سابقًا.
   const arSubs = [], enSubs = [];
   for (const s of rawSubs) {
     const l = (s.lang||'').toLowerCase(), isAr = l==='ara'||l==='ar'||l.includes('ara');
     const orig = s.origName || (isAr ? 'ترجمة عربية' : 'Subtitle');
     const tag = s._seasonPack ? ' [باقة الموسم]' : '';
     const label = `${orig} • ${sourceLabelOf(s._source)} • ${s._ext.toUpperCase()}${tag}`;
-    const formatted = { id: `sub_${s.url.slice(-10)}`, url: s.url, lang: label, name: label, title: label, _ext: s._ext, _source: s._source, origName: orig };
+    // مهم: lang يجب أن يبقى رمز لغة ISO 639-2 صحيح (ara/eng) وليس نصًا وصفيًا -
+    // وضع نص كامل هنا يجعل Nuvio يرفض عرض الترجمة بالكامل. التسمية الوصفية
+    // توضع فقط في name/title.
+    const formatted = { id: `sub_${s.url.slice(-10)}`, url: s.url, lang: isAr ? 'ara' : (l || 'eng'), name: label, title: label, _ext: s._ext, _source: s._source, origName: orig };
     isAr ? arSubs.push(formatted) : enSubs.push(formatted);
   }
 
@@ -737,7 +736,7 @@ app.get(['/subtitles/:type/:id.json', '/subtitles/:type/:id/:extra.json', '/:con
     const base = req.params.config ? `${protocol}://${host}/${req.params.config}` : `${protocol}://${host}`;
     enSubs.slice(0, 5).forEach((c, idx) => {
       const aiLabel = `${c.origName} • ${sourceLabelOf(c._source)} • trans • ASS`;
-      aiSubs.push({ id: `trans_${idx+1}`, url: `${base}/translate/trans.ass?subUrl=${encodeURIComponent(c.url)}`, lang: aiLabel, name: aiLabel, title: aiLabel });
+      aiSubs.push({ id: `trans_${idx+1}`, url: `${base}/translate/trans.ass?subUrl=${encodeURIComponent(c.url)}`, lang: 'ara', name: aiLabel, title: aiLabel });
     });
   }
 
