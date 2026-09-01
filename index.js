@@ -79,7 +79,7 @@ const SOURCE_LABELS = {
   'opensub-v3': 'OpenSubtitles', 'opensub-fun': 'OpenSubtitles', 'opensub-official': 'OpenSubtitles',
   'subdl-mirror': 'SubDL', 'subdl-official': 'SubDL', 'subdl-v2': 'SubDL (Subscene)', 'yify': 'YIFY', 'anime-subs': 'AnimeSubs',
   'kitsunekko': 'Kitsunekko', 'subanime': 'SubAnime', 'animetosho': 'AnimeTosho',
-  'wyzie': 'Wyzie Subs', 'subsource': 'SubSource', 'jimaku': 'Jimaku'
+  'wyzie': 'Wyzie Subs', 'subsource': 'SubSource', 'jimaku': 'Jimaku', 'gestdown': 'Addic7ed'
 };
 function sourceLabelOf(key) { return SOURCE_LABELS[key] || 'Source'; }
 
@@ -287,7 +287,7 @@ async function resolveExternalId(rawId) {
     const parts = rawId.split(':');
     const prefix = parts[0];
     const map = await getAnimeListMap();
-    let result = { imdbId: null, kitsuId: null, anilistId: null, absoluteEp: null, title: null, isMovie: false };
+    let result = { imdbId: null, kitsuId: null, anilistId: null, tvdbId: null, tvdbSeason: null, tvdbEpisode: null, absoluteEp: null, title: null, isMovie: false };
 
     if (['kitsu', 'mal', 'anilist'].includes(prefix)) {
       const extId = parts[1];
@@ -298,6 +298,7 @@ async function resolveExternalId(rawId) {
       const entry = map.find(e => String(e[field]) === String(extId));
       result.kitsuId = entry?.kitsu_id || (prefix === 'kitsu' ? extId : null);
       result.anilistId = entry?.anilist_id || (prefix === 'anilist' ? extId : null);
+      result.tvdbId = entry?.tvdb_id || null;
 
       if (prefix === 'kitsu') {
         const res = await axios.get(`https://kitsu.io/api/edge/anime/${extId}`, getAxiosConfig()).catch(()=>null);
@@ -313,9 +314,14 @@ async function resolveExternalId(rawId) {
         } catch (e) { logErr('anilist:title', e); }
       }
 
+      if (!result.isMovie && entry) {
+        result.tvdbSeason = entry.season?.tvdb ?? 1;
+        result.tvdbEpisode = result.absoluteEp + (entry.episode_offset?.tvdb ?? 0);
+      }
+
       if (entry?.imdb_id) {
         const iId = Array.isArray(entry.imdb_id) ? entry.imdb_id[0] : String(entry.imdb_id).split(',')[0].trim();
-        result.imdbId = result.isMovie ? iId : `${iId}:${entry.season?.tvdb ?? 1}:${result.absoluteEp + (entry.episode_offset?.tvdb ?? 0)}`;
+        result.imdbId = result.isMovie ? iId : `${iId}:${result.tvdbSeason}:${result.tvdbEpisode}`;
       }
     }
     else if (rawId.startsWith('tt')) {
@@ -329,8 +335,11 @@ async function resolveExternalId(rawId) {
       if (entry) {
         result.kitsuId = entry.kitsu_id;
         result.anilistId = entry.anilist_id;
+        result.tvdbId = entry.tvdb_id || null;
         if (episode != null) result.absoluteEp = episode - (entry.episode_offset?.tvdb ?? 0);
       }
+      result.tvdbSeason = season;
+      result.tvdbEpisode = episode;
       result.imdbId = rawId;
     }
 
@@ -534,6 +543,30 @@ async function fetchJimakuDirect(anilistId, episode, apiKey) {
 
     return out;
   } catch (e) { logErr('jimakuDirect', e); return []; }
+}
+
+// ============= Gestdown (وكيل نظيف لـ Addic7ed - بدون تسجيل دخول أو CAPTCHA) =============
+// توثيق رسمي: https://gestdown.readme.io/reference . يعمل فقط مع المسلسلات (TV)،
+// ويحتاج رقم TVDB (نملكه أصلاً من قاعدة anime-lists). بدون مفتاح API.
+async function fetchGestdownDirect(tvdbId, season, episode) {
+  if (!tvdbId || season == null || episode == null) return [];
+  try {
+    const showRes = await axios.get(`https://api.gestdown.info/shows/external/tvdb/${tvdbId}`, getAxiosConfig());
+    const shows = Array.isArray(showRes.data) ? showRes.data : (showRes.data?.shows || []);
+    const showUniqueId = shows[0]?.id || shows[0]?.showUniqueId;
+    if (!showUniqueId) { console.log(`[gestdown] لا يوجد عرض مطابق لـ tvdb:${tvdbId}`); return []; }
+
+    const subsRes = await axios.get(`https://api.gestdown.info/subtitles/get/Arabic/${showUniqueId}/${season}/${episode}`, getAxiosConfig());
+    const subs = subsRes.data?.matchingSubtitles || subsRes.data?.subtitles || (Array.isArray(subsRes.data) ? subsRes.data : []);
+    console.log(`[gestdown] tvdb:${tvdbId} S${season}E${episode} -> ${subs.length} ترجمة عربية`);
+
+    return subs
+      .filter(s => s.subtitleId || s.id)
+      .map(s => ({ _gestdownId: s.subtitleId || s.id, lang: 'ara', origName: s.version || s.releaseName || 'Gestdown', _source: 'gestdown' }));
+  } catch (e) {
+    if (e?.response?.status !== 404) logErr('gestdownDirect', e);
+    return [];
+  }
 }
 
 function mirrorRequest(url, sourceKey, seasonPack) {
@@ -888,6 +921,10 @@ app.get(['/subtitles/:type/:id.json', '/subtitles/:type/:id/:extra.json', '/:con
       reqs.push(fetchSubDLv2ByName(animeInfo.title, config.subdlKey));
     }
     if (config.subsourceKey) reqs.push(fetchSubSourceDirect(animeInfo.title, config.subsourceKey));
+    // Gestdown: مسلسلات فقط (لا يدعم الأفلام)، بدون مفتاح
+    if (!animeInfo.isMovie && animeInfo.tvdbId && animeInfo.tvdbSeason != null && animeInfo.tvdbEpisode != null) {
+      reqs.push(fetchGestdownDirect(animeInfo.tvdbId, animeInfo.tvdbSeason, animeInfo.tvdbEpisode));
+    }
   }
 
   const results = await Promise.all(reqs);
@@ -898,6 +935,12 @@ app.get(['/subtitles/:type/:id.json', '/subtitles/:type/:id/:extra.json', '/:con
   // - مع تمرير تلميح رقم الحلقة إن وُجد (مهم لحزم Jimaku متعددة الحلقات)
   rawSubs = rawSubs.map(s => s?._zipUrl
     ? { ...s, url: `${protocol}://${host}/subdl-extract/${slugify(s.origName)}.ass?zipUrl=${encodeURIComponent(s._zipUrl)}${s._episodeHint ? `&ep=${s._episodeHint}` : ''}` }
+    : s);
+
+  // تحويل نتائج Gestdown لروابط تمر عبر بروكسي بجهتنا (يطلب text/plain صراحة
+  // لأن endpoint التحميل الرسمي يرجع JSON افتراضيًا بدل النص الخام)
+  rawSubs = rawSubs.map(s => s?._gestdownId
+    ? { ...s, url: `${protocol}://${host}/gestdown-fetch/${slugify(s.origName)}.srt?subtitleId=${encodeURIComponent(s._gestdownId)}` }
     : s);
 
   subdlZips.forEach(z => rawSubs.push({ ...z, url: `${protocol}://${host}/subdl-extract/${slugify(z.origName)}.ass?zipUrl=${encodeURIComponent(z.zipUrl)}` }));
@@ -956,6 +999,30 @@ app.get(['/subtitles/:type/:id.json', '/subtitles/:type/:id/:extra.json', '/:con
   console.log(`[subtitles] ${type}/${targetId} -> عربي:${arSubs.length} (معروض:${limitedAr.length}) | أجنبي:${enSubs.length} | AI:${aiSubs.length}`);
 
   res.json({ subtitles: [...limitedAr.map(({_ext,_source,origName,...rest})=>rest), ...aiSubs] });
+});
+
+// بروكسي تحميل Gestdown: يطلب النص الخام صراحة (Accept: text/plain) لأن الرابط
+// الرسمي يرجع JSON افتراضيًا، ويحتاط لو رجع JSON رغم ذلك بمحاولة استخراج النص منه
+app.get(['/gestdown-fetch', '/gestdown-fetch/:filename'], async (req, res) => {
+  const { subtitleId } = req.query;
+  if (!subtitleId) return res.status(400).send("Missing subtitleId");
+  try {
+    const r = await axios.get(`https://api.gestdown.info/subtitles/download/${encodeURIComponent(subtitleId)}`, {
+      headers: { 'Accept': 'text/plain', 'User-Agent': USER_AGENTS[0] },
+      timeout: 12000,
+      responseType: 'text',
+      transformResponse: d => d // منع axios من محاولة تحليل JSON تلقائيًا
+    });
+    let content = r.data;
+    if (typeof content === 'string' && content.trim().startsWith('{')) {
+      try {
+        const parsed = JSON.parse(content);
+        content = parsed?.content || parsed?.data || parsed?.subtitle || content;
+      } catch (e) { /* ليس JSON فعليًا رغم الشكل، نتركه كما هو */ }
+    }
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.send(content);
+  } catch (err) { logErr('gestdown-fetch', err); res.status(500).send("Failed to fetch subtitle"); }
 });
 
 app.get(['/subdl-extract', '/subdl-extract/:filename'], async (req, res) => {
