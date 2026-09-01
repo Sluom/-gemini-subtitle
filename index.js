@@ -91,6 +91,17 @@ function slugify(str) {
     .replace(/[^\w\u0600-\u06FF\- ]/g, '').trim().replace(/\s+/g, '-').slice(0, 60) || 'subtitle';
 }
 
+// إصلاح: عمليات "البحث بالاسم" (OpenSubtitles/SubDL/SubSource) كانت لا تُصفّي
+// حسب رقم الحلقة إطلاقًا - ترجع أي حلقة من المسلسل كامل، ما يفسر "ترجمة لا تطابق
+// الحلقة". نطبّق فلترة بمطابقة رقم الحلقة داخل اسم الإصدار، مع الإبقاء على كل
+// النتائج كحل احتياطي فقط لو ما وُجدت أي مطابقة (أفضل من صفر نتائج).
+function filterByEpisode(list, episode) {
+  if (!episode || !Array.isArray(list) || !list.length) return list;
+  const re = new RegExp(`(^|[^0-9])0*${episode}([^0-9]|$)`);
+  const matched = list.filter(s => re.test(s.origName || ''));
+  return matched.length ? matched : list;
+}
+
 // ============= حماية هندسة ASS و Masking =============
 const ASS_DEFAULT_HEADER = `[Script Info]
 ScriptType: v4.00+
@@ -175,7 +186,7 @@ function buildRepeatingErrorAss(headerLines, message) {
   const lines = [...headerLines];
   const totalSeconds = 3 * 60 * 60, interval = 180;
   for (let t = 0; t < totalSeconds; t += interval) {
-    lines.push(`Dialogue: 0,${assSecondsToTime(t)},${assSecondsToTime(t + 8)},Default,,0,0,0,,\u200F${message}`);
+    lines.push(`Dialogue: 0,${assSecondsToTime(t)},${assSecondsToTime(t + 8)},Default,,0,0,0,,${message}`);
   }
   return lines.join('\n') + '\n';
 }
@@ -191,10 +202,11 @@ Rules:
 Length: ${texts.length}. Input: ${JSON.stringify(texts)}`;
 
   const t0 = Date.now();
+  const AI_TIMEOUT = 60000; // مهلة أطول بكثير من الافتراضية (10s) لأن توليد نص JSON كامل يحتاج وقتًا أطول من طلبات البحث الخفيفة
   try {
     if (provider === 'gemini') {
       const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${encodeURIComponent(key.trim())}`;
-      const r = await axios.post(url, { contents: [{ parts: [{ text: prompt }] }], generationConfig: { response_mime_type: 'application/json' } }, getAxiosConfig({'Content-Type': 'application/json'}));
+      const r = await axios.post(url, { contents: [{ parts: [{ text: prompt }] }], generationConfig: { response_mime_type: 'application/json' } }, { ...getAxiosConfig({'Content-Type': 'application/json'}), timeout: AI_TIMEOUT });
       const raw = r.data?.candidates?.[0]?.content?.parts?.[0]?.text;
       if (raw) {
         const parsed = (JSON.parse(raw)).data || JSON.parse(raw);
@@ -206,7 +218,7 @@ Length: ${texts.length}. Input: ${JSON.stringify(texts)}`;
       const isGroq = provider === 'groq';
       const url = isGroq ? 'https://api.groq.com/openai/v1/chat/completions' : 'https://api.openai.com/v1/chat/completions';
       const model = isGroq ? 'llama-3.3-70b-versatile' : 'gpt-4o-mini';
-      const r = await axios.post(url, { model, messages: [{ role: 'user', content: prompt }], response_format: { type: 'json_object' } }, getAxiosConfig({ Authorization: `Bearer ${key.trim()}`, 'Content-Type': 'application/json' }));
+      const r = await axios.post(url, { model, messages: [{ role: 'user', content: prompt }], response_format: { type: 'json_object' } }, { ...getAxiosConfig({ Authorization: `Bearer ${key.trim()}`, 'Content-Type': 'application/json' }), timeout: AI_TIMEOUT });
       const raw = r.data?.choices?.[0]?.message?.content;
       if (raw) {
         const parsed = (JSON.parse(raw)).data || JSON.parse(raw).translations;
@@ -217,7 +229,7 @@ Length: ${texts.length}. Input: ${JSON.stringify(texts)}`;
     if (provider === 'deepl') {
       const isFree = key.trim().endsWith(':fx');
       const dUrl = isFree ? 'https://api-free.deepl.com/v2/translate' : 'https://api.deepl.com/v2/translate';
-      const r = await axios.post(dUrl, { text: texts, target_lang: 'AR', preserve_formatting: true }, getAxiosConfig({ Authorization: `DeepL-Auth-Key ${key.trim()}`, 'Content-Type': 'application/json' }));
+      const r = await axios.post(dUrl, { text: texts, target_lang: 'AR', preserve_formatting: true }, { ...getAxiosConfig({ Authorization: `DeepL-Auth-Key ${key.trim()}`, 'Content-Type': 'application/json' }), timeout: AI_TIMEOUT });
       if (r.data?.translations?.length === texts.length) {
         console.log(`[translateChunk:deepl] ${texts.length} سطر خلال ${((Date.now()-t0)/1000).toFixed(1)}s`);
         return r.data.translations.map(t => t.text);
@@ -811,6 +823,23 @@ app.get(['/', '/configure'], (req, res) => {
 
 app.get(['/manifest.json', '/:config/manifest.json'], (req, res) => res.json(manifest));
 
+// استخراج مرن وموحّد للأسطر من أي صيغة (ASS/SSA أو SRT) بدون أي شرط أو تفضيل -
+// لا نحاول الحفاظ على بنية الملف الأصلي (كانت هشة وتفشل بصمت مع ملفات ASS الحقيقية
+// كثيرة الاختلاف بالتنسيق)، فقط نستخرج (بداية، نهاية، نص) وننتج ملف ASS جديد بسيط
+// ومضمون العمل دائمًا - الأولوية للعمل الفعلي وليس لحفظ التنسيق الأصلي بدقة
+function extractCuesUniversal(text) {
+  const assLines = text.split(/\r?\n/).filter(l => /^Dialogue:/i.test(l.trim()));
+  if (assLines.length > 0) {
+    const cues = [];
+    for (const line of assLines) {
+      const m = line.match(/^Dialogue:\s*[^,]*,([^,]*),([^,]*),(?:[^,]*,){6}(.*)$/i);
+      if (m) cues.push({ start: m[1].trim(), end: m[2].trim(), text: m[3] });
+    }
+    if (cues.length) return cues;
+  }
+  return parseSrt(text) || [];
+}
+
 // ============= الترجمة الفورية =============
 app.get(['/translate', '/:config/translate', '/translate/:filename', '/:config/translate/:filename'], async (req, res) => {
   const subUrl = req.query.subUrl; if (!subUrl) return res.status(400).send("No URL");
@@ -819,7 +848,7 @@ app.get(['/translate', '/:config/translate', '/translate/:filename', '/:config/t
   const tStart = Date.now();
   let text;
   try {
-    const r = await axios.get(subUrl, { responseType: 'arraybuffer', timeout: 12000, headers: {'User-Agent': USER_AGENTS[0]} });
+    const r = await axios.get(subUrl, { responseType: 'arraybuffer', timeout: 15000, headers: {'User-Agent': USER_AGENTS[0]} });
     const buf = Buffer.from(r.data);
     text = safeDecodeText(buf);
   } catch (err) {
@@ -827,31 +856,22 @@ app.get(['/translate', '/:config/translate', '/translate/:filename', '/:config/t
     return res.redirect(subUrl);
   }
 
-  const isAss = isAssUrl(subUrl) || /^\uFEFF?\[Script Info\]/im.test(text);
   let outText = text;
   try {
-    const assP = isAss ? parseAss(text) : null;
-    const cues = assP ? assP.dialogues : (parseSrt(text) || []);
+    const cues = extractCuesUniversal(text);
+    console.log(`[translate:${reqId}] استُخرج ${cues.length} سطر من الملف الأصلي`);
     if (cues.length > 0) {
       const masked = cues.map(c => { const m = maskTags(c.text); return { txt: c.text, masked: m.masked, tags: m.tags }; });
       const transResult = await translateTextArray(masked.map(c => c.masked), keys);
 
       if (transResult && transResult.results.length === cues.length) {
         const trans = transResult.results;
-        // \u200F (RLM) في بداية كل سطر عربي مُترجم يمنع محرك عرض الترجمة من "عكس"
-        // مكان علامات الترقيم اللاتينية المتبقية (-, !, .) بصريًا بسبب اختلاط RTL/LTR
-        if (assP) {
-          const lines = [...assP.headerLines];
-          assP.dialogues.forEach((d, i) => lines.push(`${d.prefix}: ${d.before.join(',')},\u200F${unmaskTags(trans[i], masked[i].tags)}`));
-          outText = lines.join('\n') + '\n';
-        } else {
-          outText = buildAssFromCues(cues.map((c, i) => ({ start: c.start, end: c.end, text: '\u200F' + unmaskTags(trans[i], masked[i].tags) })));
-        }
+        outText = buildAssFromCues(cues.map((c, i) => ({ start: c.start, end: c.end, text: unmaskTags(trans[i], masked[i].tags) })));
         if (transResult.partial) console.log(`[translate:${reqId}] نتيجة جزئية: بعض الأسطر بقيت بلغتها الأصلية`);
       } else {
         console.log(`[translate:${reqId}] فشلت الترجمة بالكامل مع كل المزودين`);
         const errMsg = "[النظام] عذراً، فشلت الترجمة الفورية بسبب ضغط الخوادم أو رفض الاستجابة.";
-        outText = buildRepeatingErrorAss(assP ? assP.headerLines : ASS_DEFAULT_HEADER.split('\n'), errMsg);
+        outText = buildRepeatingErrorAss(ASS_DEFAULT_HEADER.split('\n'), errMsg);
       }
     }
   } catch (e) { logErr(`translate:${reqId}`, e); }
@@ -915,13 +935,14 @@ app.get(['/subtitles/:type/:id.json', '/subtitles/:type/:id/:extra.json', '/:con
   // kitsu/mal/anilist إلى IMDB عبر قاعدة anime-lists، وهذا التحويل يفشل كثيرًا
   // للأنميات الأحدث أو الأقل شهرة - ما كان يعني تجاهل أقوى مصدرين مفتاحين بالكامل.
   if (isAnime && animeInfo?.title) {
-    if (config.openSubKey) reqs.push(fetchOpenSubtitlesByName(animeInfo.title, config.openSubKey));
+    const ep = animeInfo.absoluteEp;
+    if (config.openSubKey) reqs.push(fetchOpenSubtitlesByName(animeInfo.title, config.openSubKey).then(list => filterByEpisode(list, ep)));
     if (config.subdlKey) {
-      reqs.push(fetchSubDLByName(animeInfo.title, config.subdlKey).then(list => list.map(z => ({ ...z, url: null, _zipUrl: z.zipUrl }))));
-      reqs.push(fetchSubDLv2ByName(animeInfo.title, config.subdlKey));
+      reqs.push(fetchSubDLByName(animeInfo.title, config.subdlKey).then(list => filterByEpisode(list, ep).map(z => ({ ...z, url: null, _zipUrl: z.zipUrl }))));
+      reqs.push(fetchSubDLv2ByName(animeInfo.title, config.subdlKey).then(list => filterByEpisode(list, ep)));
     }
-    if (config.subsourceKey) reqs.push(fetchSubSourceDirect(animeInfo.title, config.subsourceKey));
-    // Gestdown: مسلسلات فقط (لا يدعم الأفلام)، بدون مفتاح
+    if (config.subsourceKey) reqs.push(fetchSubSourceDirect(animeInfo.title, config.subsourceKey).then(list => filterByEpisode(list, ep)));
+    // Gestdown: مسلسلات فقط (لا يدعم الأفلام)، بدون مفتاح - يُصفّى أصلاً برقم الحلقة عبر الـ API نفسه
     if (!animeInfo.isMovie && animeInfo.tvdbId && animeInfo.tvdbSeason != null && animeInfo.tvdbEpisode != null) {
       reqs.push(fetchGestdownDirect(animeInfo.tvdbId, animeInfo.tvdbSeason, animeInfo.tvdbEpisode));
     }
@@ -959,6 +980,10 @@ app.get(['/subtitles/:type/:id.json', '/subtitles/:type/:id/:extra.json', '/:con
     console.log(`[fallback] نتائج البحث بالاسم: ${byNameOS.length + byNameSubDL.length}`);
   }
 
+  // إصلاح: استبعاد أي نتيجة رابطها غير صالح إطلاقًا قبل عرضها - هذا يمنع ظهور
+  // خيارات ترجمة تبدو موجودة بالقائمة لكنها فارغة تمامًا عند التشغيل الفعلي
+  rawSubs = rawSubs.filter(s => s && typeof s.url === 'string' && /^https?:\/\//i.test(s.url));
+
   const uMap = new Map();
   for (const s of rawSubs) {
     if (!s || !s.url) continue;
@@ -977,7 +1002,9 @@ app.get(['/subtitles/:type/:id.json', '/subtitles/:type/:id/:extra.json', '/:con
     // مهم: lang يجب أن يبقى رمز لغة ISO 639-2 صحيح (ara/eng) وليس نصًا وصفيًا -
     // وضع نص كامل هنا يجعل Nuvio يرفض عرض الترجمة بالكامل. التسمية الوصفية
     // توضع فقط في name/title.
-    const formatted = { id: `sub_${s.url.slice(-10)}`, url: s.url, lang: isAr ? 'ara' : (l || 'eng'), name: label, title: label, _ext: s._ext, _source: s._source, origName: orig };
+    // إصلاح: id وصفي (مثل: universal-ass-opensubtitles-ara-1) بدل جزء عشوائي من
+    // الرابط - بعض تطبيقات Nuvio تعرض id كسطر فرعي، فيصبح مفيدًا للعين بدل نص عشوائي
+    const formatted = { _idBase: `${s._ext}-${(s._source||'source')}-${isAr ? 'ara' : (l||'eng')}`, url: s.url, lang: isAr ? 'ara' : (l || 'eng'), name: label, title: label, _ext: s._ext, _source: s._source, origName: orig };
     isAr ? arSubs.push(formatted) : enSubs.push(formatted);
   }
 
@@ -985,20 +1012,20 @@ app.get(['/subtitles/:type/:id.json', '/subtitles/:type/:id/:extra.json', '/:con
   const sorter = (a, b) => (rank[a._ext]??3) - (rank[b._ext]??3);
   arSubs.sort(sorter); enSubs.sort(sorter);
 
-  const limitedAr = arSubs.slice(0, config.limit);
+  const limitedAr = arSubs.slice(0, config.limit).map((s, i) => ({ ...s, id: `universal-${s._idBase}-${i+1}` }));
 
   const aiSubs = [];
   if (enSubs.length > 0 && (config.geminiKey || config.groqKey || config.openaiKey || config.deeplKey)) {
     const base = req.params.config ? `${protocol}://${host}/${req.params.config}` : `${protocol}://${host}`;
     enSubs.slice(0, 5).forEach((c, idx) => {
       const aiLabel = `${c.origName} • ${sourceLabelOf(c._source)} • trans • ASS`;
-      aiSubs.push({ id: `trans_${idx+1}`, url: `${base}/translate/${slugify(c.origName)}-trans.ass?subUrl=${encodeURIComponent(c.url)}`, lang: 'ara', name: aiLabel, title: aiLabel });
+      aiSubs.push({ id: `universal-ass-trans-ara-${idx+1}`, url: `${base}/translate/${slugify(c.origName)}-trans.ass?subUrl=${encodeURIComponent(c.url)}`, lang: 'ara', name: aiLabel, title: aiLabel });
     });
   }
 
   console.log(`[subtitles] ${type}/${targetId} -> عربي:${arSubs.length} (معروض:${limitedAr.length}) | أجنبي:${enSubs.length} | AI:${aiSubs.length}`);
 
-  res.json({ subtitles: [...limitedAr.map(({_ext,_source,origName,...rest})=>rest), ...aiSubs] });
+  res.json({ subtitles: [...limitedAr.map(({_ext,_source,origName,_idBase,...rest})=>rest), ...aiSubs] });
 });
 
 // بروكسي تحميل Gestdown: يطلب النص الخام صراحة (Accept: text/plain) لأن الرابط
