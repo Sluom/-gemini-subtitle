@@ -993,6 +993,7 @@ app.get(['/subtitles/:type/:id.json', '/subtitles/:type/:id/:extra.json', '/:con
   }
   rawSubs = Array.from(uMap.values());
 
+  const rank = { ass: 0, ssa: 0, vtt: 1, srt: 2 };
   const arSubs = [], enSubs = [];
   for (const s of rawSubs) {
     const l = (s.lang||'').toLowerCase(), isAr = l==='ara'||l==='ar'||l.includes('ara');
@@ -1004,20 +1005,28 @@ app.get(['/subtitles/:type/:id.json', '/subtitles/:type/:id/:extra.json', '/:con
     // توضع فقط في name/title.
     // إصلاح: id وصفي (مثل: universal-ass-opensubtitles-ara-1) بدل جزء عشوائي من
     // الرابط - بعض تطبيقات Nuvio تعرض id كسطر فرعي، فيصبح مفيدًا للعين بدل نص عشوائي
-    const formatted = { _idBase: `${s._ext}-${(s._source||'source')}-${isAr ? 'ara' : (l||'eng')}`, url: s.url, lang: isAr ? 'ara' : (l || 'eng'), name: label, title: label, _ext: s._ext, _source: s._source, origName: orig };
+    const isOwnProxy = /\/(subdl-extract|gestdown-fetch)\//.test(s.url);
+    // إصلاح: SubDL (v1 و v2) على الأرجح يحجب التحميل الفعلي على الخطة المجانية
+    // (البحث يعمل، لكن رابط الملف الفعلي محجوب - "downloads not included" حسب
+    // لوحة تحكم SubDL نفسها). نضعه بأولوية أخيرة دائمًا بدل حجب النتائج الحقيقية.
+    const isUnreliable = s._source === 'subdl-official' || s._source === 'subdl-v2';
+    const priority = isUnreliable ? 100 : (isOwnProxy ? 50 : 0) + (rank[s._ext] ?? 3);
+    const formatted = { _idBase: `${s._ext}-${(s._source||'source')}-${isAr ? 'ara' : (l||'eng')}`, _priority: priority, _isUnreliable: isUnreliable, url: s.url, lang: isAr ? 'ara' : (l || 'eng'), name: label, title: label, _ext: s._ext, _source: s._source, origName: orig };
     isAr ? arSubs.push(formatted) : enSubs.push(formatted);
   }
 
-  const rank = { ass: 0, ssa: 0, vtt: 1, srt: 2 };
-  const sorter = (a, b) => (rank[a._ext]??3) - (rank[b._ext]??3);
+  const sorter = (a, b) => a._priority - b._priority;
   arSubs.sort(sorter); enSubs.sort(sorter);
 
   const limitedAr = arSubs.slice(0, config.limit).map((s, i) => ({ ...s, id: `universal-${s._idBase}-${i+1}` }));
 
   const aiSubs = [];
-  if (enSubs.length > 0 && (config.geminiKey || config.groqKey || config.openaiKey || config.deeplKey)) {
+  // استبعاد مصادر SubDL غير الموثوقة من مرشحات ترجمة الذكاء الاصطناعي أيضًا -
+  // لا فائدة من محاولة ترجمة ملف مصدر لا يعمل من الأساس
+  const aiCandidates = enSubs.filter(c => !c._isUnreliable);
+  if (aiCandidates.length > 0 && (config.geminiKey || config.groqKey || config.openaiKey || config.deeplKey)) {
     const base = req.params.config ? `${protocol}://${host}/${req.params.config}` : `${protocol}://${host}`;
-    enSubs.slice(0, 5).forEach((c, idx) => {
+    aiCandidates.slice(0, 5).forEach((c, idx) => {
       const aiLabel = `${c.origName} • ${sourceLabelOf(c._source)} • trans • ASS`;
       aiSubs.push({ id: `universal-ass-trans-ara-${idx+1}`, url: `${base}/translate/${slugify(c.origName)}-trans.ass?subUrl=${encodeURIComponent(c.url)}`, lang: 'ara', name: aiLabel, title: aiLabel });
     });
@@ -1053,9 +1062,19 @@ app.get(['/gestdown-fetch', '/gestdown-fetch/:filename'], async (req, res) => {
 });
 
 app.get(['/subdl-extract', '/subdl-extract/:filename'], async (req, res) => {
+  const t0 = Date.now();
   try {
-    const r = await axios.get(req.query.zipUrl, { responseType: 'arraybuffer', timeout: 12000, headers: {'User-Agent': USER_AGENTS[0]} });
-    const z = new AdmZip(Buffer.from(r.data)), entries = z.getEntries().filter(e => /\.(srt|ass|ssa|vtt)$/i.test(e.entryName));
+    const r = await axios.get(req.query.zipUrl, { responseType: 'arraybuffer', timeout: 15000, headers: {'User-Agent': USER_AGENTS[0]} });
+    console.log(`[subdl-extract] جلب ${req.query.zipUrl.slice(0,80)}... -> ${r.data?.byteLength || 0} بايت خلال ${((Date.now()-t0)/1000).toFixed(1)}s`);
+    let z;
+    try { z = new AdmZip(Buffer.from(r.data)); }
+    catch (zipErr) {
+      // إن لم يكن الملف zip فعليًا (بل نص/HTML خطأ)، نعرضه كما هو للتشخيص
+      const asText = Buffer.from(r.data).toString('utf8').slice(0, 300);
+      console.log(`[subdl-extract] الملف ليس أرشيف zip صالح! أول 300 حرف: ${asText}`);
+      return res.status(502).send("Not a valid zip archive - source link likely broken or requires a paid plan");
+    }
+    const entries = z.getEntries().filter(e => /\.(srt|ass|ssa|vtt)$/i.test(e.entryName));
     if (!entries.length) return res.status(404).send("No sub found");
 
     // إذا مُررت رقم حلقة (ep) - غالبًا لحزم متعددة الحلقات مثل حزم Jimaku الكاملة -
@@ -1070,7 +1089,15 @@ app.get(['/subdl-extract', '/subdl-extract/:filename'], async (req, res) => {
     const chosen = candidates.find(e=>/\.ass$/i.test(e.entryName)) || candidates.find(e=>/\.srt$/i.test(e.entryName)) || candidates[0];
     res.setHeader('Content-Type', chosen.entryName.toLowerCase().endsWith('ass') ? 'text/x-ssa; charset=utf-8' : 'text/plain; charset=utf-8');
     res.send(chosen.getData().toString('utf8'));
-  } catch (err) { logErr('extract', err); res.status(500).send("Extraction failed"); }
+  } catch (err) {
+    // تشخيص صريح: هل السبب حجب مدفوع (401/402/403) أو شيء آخر؟
+    const status = err?.response?.status;
+    if (status === 401 || status === 402 || status === 403) {
+      console.log(`[subdl-extract] فشل بكود ${status} - على الأرجح يحتاج خطة مدفوعة (SubDL Pro) لتحميل الملف الفعلي`);
+    }
+    logErr('extract', err);
+    res.status(500).send("Extraction failed");
+  }
 });
 
 const PORT = process.env.PORT || 10000;
