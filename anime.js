@@ -10,84 +10,46 @@ function getRandomUA() {
   return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
 }
 
-function getAxiosConfig(extraHeaders = {}) {
+function getAxiosConfig() {
   return {
     headers: {
       'User-Agent': getRandomUA(),
-      'Accept': '*/*',
-      ...extraHeaders
+      'Accept': '*/*'
     },
-    timeout: 10000
+    timeout: 7000
   };
 }
 
-async function fetchJimakuDirect(anilistId, apiKey) {
-  if (!apiKey || !anilistId) return [];
+async function fetchKitsuMirror(url, sourceKey) {
   try {
-    const s = await axios.get(
-      `https://jimaku.cc/api/entries/search?anilist_id=${anilistId}`,
-      getAxiosConfig({ 'Authorization': apiKey.trim() })
-    );
-    const entryId = s.data?.[0]?.id;
-    if (!entryId) return [];
-
-    const f = await axios.get(
-      `https://jimaku.cc/api/entries/${entryId}/files`,
-      getAxiosConfig({ 'Authorization': apiKey.trim() })
-    );
-
-    const files = (Array.isArray(f.data) ? f.data : []).filter(file =>
-      /\.(ass|ssa|srt|vtt|zip)$/i.test(file.name || file.url || '')
-    );
-
-    return files.map(file => ({
-      url: file.url,
-      lang: 'ara',
-      origName: file.name || 'Jimaku Anime',
-      _source: 'jimaku',
+    const res = await axios.get(url, getAxiosConfig());
+    const subs = res.data?.subtitles || [];
+    return subs.map(s => ({
+      url: s.url,
+      lang: (s.lang || 'ara').toLowerCase(),
+      origName: s.title || s.name || 'Anime Subs',
+      _source: sourceKey,
       _priority: 1
     }));
-  } catch (e) {
+  } catch (err) {
     return [];
   }
 }
 
-async function fetchAnimeMirror(url, sourceKey) {
-  try {
-    const r = await axios.get(url, getAxiosConfig());
-    return (r.data?.subtitles || []).map(s => ({
-      url: s.url,
-      lang: s.lang || 'ara',
-      origName: s.title || s.name || sourceKey,
-      _source: sourceKey,
-      _priority: 2
-    }));
-  } catch (e) {
+async function getAnimeSubtitles(targetId) {
+  if (!targetId || !targetId.startsWith('kitsu:')) {
     return [];
   }
-}
 
-async function getAnimeSubtitles({ targetId, type, apiKey }) {
-  const isAnimeTarget = targetId.startsWith('kitsu') || 
-                       targetId.startsWith('anilist') || 
-                       targetId.startsWith('mal') || 
-                       type === 'anime';
+  const cleanId = targetId.trim();
+  const endpoints = [
+    fetchKitsuMirror(`https://anime-kitsu.strem.fun/subtitles/anime/${cleanId}.json`, 'kitsu-fun-anime'),
+    fetchKitsuMirror(`https://anime-kitsu.strem.fun/subtitles/series/${cleanId}.json`, 'kitsu-fun-series'),
+    fetchKitsuMirror(`https://anime-kitsu.strem.fun/subtitles/movie/${cleanId}.json`, 'kitsu-fun-movie')
+  ];
 
-  if (!isAnimeTarget) return [];
+  const results = await Promise.allSettled(endpoints);
 
-  const requests = [];
-
-  requests.push(
-    fetchAnimeMirror(`https://anime-subtitles.strem.fun/subtitles/series/${targetId}.json`, 'anime-subs'),
-    fetchAnimeMirror(`https://kitsunekko-subtitles.strem.fun/subtitles/series/${targetId}.json`, 'kitsunekko')
-  );
-
-  if (apiKey && (targetId.startsWith('anilist') || targetId.startsWith('kitsu'))) {
-    const rawId = targetId.split(':')[1] || targetId.replace(/^[a-z]+:/i, '');
-    requests.push(fetchJimakuDirect(rawId, apiKey));
-  }
-
-  const results = await Promise.allSettled(requests);
   return results
     .filter(r => r.status === 'fulfilled')
     .flatMap(r => r.value)
@@ -95,4 +57,3 @@ async function getAnimeSubtitles({ targetId, type, apiKey }) {
 }
 
 module.exports = { getAnimeSubtitles };
-
