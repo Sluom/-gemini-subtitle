@@ -10,76 +10,106 @@ function getRandomUA() {
   return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
 }
 
-function getAxiosConfig(extraHeaders = {}) {
+function getAxiosConfig(apiKey) {
+  const headers = {
+    'User-Agent': getRandomUA(),
+    'Accept': 'application/json'
+  };
+
+  if (apiKey) {
+    const cleanKey = apiKey.trim();
+    headers['Authorization'] = `Bearer ${cleanKey}`;
+    headers['X-API-Key'] = cleanKey;
+  }
+
   return {
-    headers: {
-      'User-Agent': getRandomUA(),
-      'Accept': '*/*',
-      ...extraHeaders
-    },
-    timeout: 8000
+    headers,
+    timeout: 8500
   };
 }
 
-async function fetchSubDLv2(imdbId, season, episode, apiKey) {
+async function fetchSubDLApi(imdbId, season, episode, type, apiKey) {
   if (!apiKey || !imdbId || !imdbId.startsWith('tt')) return [];
+  const cleanKey = apiKey.trim();
+
   try {
     const params = new URLSearchParams({
-      api_key: apiKey.trim(),
+      api_key: cleanKey,
       imdb_id: imdbId,
-      languages: 'ar,en',
+      languages: 'AR,EN',
+      subs_per_page: '30',
       unpack: '1'
     });
+
+    if (type === 'series' || season) {
+      params.set('type', 'tv');
+    } else {
+      params.set('type', 'movie');
+    }
+
     if (season) params.set('season_number', String(season));
     if (episode) params.set('episode_number', String(episode));
 
-    const r = await axios.get(`https://api.subdl.com/api/v2/subtitles?${params.toString()}`, getAxiosConfig());
-    const subs = r.data?.subtitles || r.data?.results || [];
-    return subs
-      .filter(s => s && (s.url || s.download_url || s.file_url))
-      .map(s => {
-        const downloadUrl = s.url || s.download_url || s.file_url;
-        const fullUrl = downloadUrl.startsWith('http') ? downloadUrl : `https://dl.subdl.com${downloadUrl}`;
-        return {
-          url: fullUrl,
-          lang: (s.lang || s.language || 'ara').toLowerCase(),
-          origName: s.release_name || s.name || 'SubDL',
-          _source: 'subdl-v2',
-          _priority: 2
-        };
-      });
-  } catch (e) {
-    return [];
-  }
-}
+    const url = `https://api.subdl.com/api/v1/subtitles?${params.toString()}`;
+    const res = await axios.get(url, getAxiosConfig(cleanKey));
 
-async function fetchSubDLSeasonPacks(imdbId, season, episode, apiKey) {
-  if (!apiKey || !imdbId || !imdbId.startsWith('tt')) return [];
-  try {
-    const params = new URLSearchParams({
-      api_key: apiKey.trim(),
-      imdb_id: imdbId,
-      languages: 'AR,EN'
-    });
-    if (season) params.set('season_number', String(season));
+    if (!res.data || res.data.status === false) return [];
 
-    const r = await axios.get(`https://api.subdl.com/api/v1/subtitles?${params.toString()}`, getAxiosConfig());
-    const subs = r.data?.subtitles || [];
-    return subs
-      .filter(item => item && item.url)
-      .map(item => {
-        const fullUrl = item.url.startsWith('http') ? item.url : `https://dl.subdl.com${item.url}`;
-        return {
+    const subtitles = res.data.subtitles || [];
+    const results = [];
+
+    for (const item of subtitles) {
+      const releaseName = item.release_name || item.name || 'SubDL';
+      const langRaw = (item.lang || item.language || 'AR').toLowerCase();
+      const isArabic = langRaw.includes('ar') || langRaw.includes('عرب');
+      const lang = isArabic ? 'ara' : 'eng';
+
+      if (Array.isArray(item.unpack_files) && item.unpack_files.length > 0) {
+        for (const file of item.unpack_files) {
+          if (!file.url) continue;
+          const fullFileUrl = file.url.startsWith('http')
+            ? file.url
+            : `https://dl.subdl.com${file.url.startsWith('/') ? '' : '/'}${file.url}`;
+
+          const fileLangRaw = (file.language || item.lang || 'AR').toLowerCase();
+          const fileIsAr = fileLangRaw.includes('ar') || fileLangRaw.includes('عرب');
+
+          if (episode && file.episode && parseInt(file.episode, 10) !== parseInt(episode, 10)) {
+            continue;
+          }
+
+          results.push({
+            url: fullFileUrl,
+            lang: fileIsAr ? 'ara' : 'eng',
+            origName: file.release_name || file.name || releaseName,
+            _source: 'subdl-api',
+            _isZip: false,
+            _priority: 2
+          });
+        }
+      }
+
+      if (item.url) {
+        const fullUrl = item.url.startsWith('http')
+          ? item.url
+          : `https://dl.subdl.com${item.url.startsWith('/') ? '' : '/'}${item.url}`;
+
+        const isZip = fullUrl.toLowerCase().endsWith('.zip') || (item.name && item.name.toLowerCase().endsWith('.zip'));
+
+        results.push({
           url: fullUrl,
-          lang: (item.lang || 'ara').toLowerCase(),
-          origName: item.release_name || item.name || 'SubDL Season Pack',
-          _source: 'subdl-official',
-          _isZip: true,
-          _episode: episode,
-          _priority: 3
-        };
-      });
-  } catch (e) {
+          lang: lang,
+          origName: releaseName,
+          _source: 'subdl-api',
+          _isZip: isZip,
+          _episode: episode || 1,
+          _priority: isZip ? 3 : 2
+        });
+      }
+    }
+
+    return results;
+  } catch (err) {
     return [];
   }
 }
@@ -89,10 +119,17 @@ async function fetchSubDLMirror(imdbId, season, episode, type) {
   try {
     const mediaType = season ? 'series' : (type === 'series' ? 'series' : 'movie');
     const mirrorTargetId = season ? `${imdbId}:${season}:${episode || 1}` : imdbId;
-    const r = await axios.get(`https://subdl-stremio.vercel.app/subtitles/${mediaType}/${mirrorTargetId}.json`, getAxiosConfig());
+    const r = await axios.get(
+      `https://subdl-stremio.vercel.app/subtitles/${mediaType}/${mirrorTargetId}.json`,
+      {
+        headers: { 'User-Agent': getRandomUA() },
+        timeout: 5000
+      }
+    );
+
     return (r.data?.subtitles || []).map(s => ({
       url: s.url,
-      lang: (s.lang || 'ara').toLowerCase(),
+      lang: (s.lang || 'ara').toLowerCase().startsWith('ar') ? 'ara' : 'eng',
       origName: s.title || s.name || 'SubDL Mirror',
       _source: 'subdl-mirror',
       _priority: 2
@@ -109,9 +146,8 @@ async function getSubDL({ imdbId, season, episode, type, apiKey }) {
     fetchSubDLMirror(imdbId, season, episode, type)
   ];
 
-  if (apiKey) {
-    requests.push(fetchSubDLv2(imdbId, season, episode, apiKey));
-    requests.push(fetchSubDLSeasonPacks(imdbId, season, episode, apiKey));
+  if (apiKey && apiKey.trim()) {
+    requests.push(fetchSubDLApi(imdbId, season, episode, type, apiKey));
   }
 
   const results = await Promise.allSettled(requests);
