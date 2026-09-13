@@ -12,7 +12,7 @@ app.use(express.json());
 
 const manifest = {
   id: "org.nuvio.universal.gemini.subtitles",
-  version: "27.1.0",
+  version: "27.2.0",
   name: "Universal Subtitles & Gemini AI",
   description: "جلب كافة الترجمات الشاملة (OpenSubtitles, SubDL, SubSource, Jimaku, AnimeTosho) مع ترجمة فورية عربية دقيقة",
   logo: "https://raw.githubusercontent.com/Sluom/-gemini-subtitle/main/logo.png",
@@ -174,6 +174,23 @@ function extractCuesUniversal(text) {
   return cues;
 }
 
+// ============= فحص واستخراج اسم النموذج الشغال تلقائياً =============
+let activeGeminiModelPath = null;
+async function resolveGeminiModel(key) {
+  if (activeGeminiModelPath) return activeGeminiModelPath;
+  try {
+    const r = await axios.get(`https://generativelanguage.googleapis.com/v1beta/models?key=${key}`, { timeout: 6000 });
+    const models = r.data?.models || [];
+    // البحث عن أفضل نموذج فلاش يدعم توليد المحتوى
+    const found = models.find(m => m.supportedGenerationMethods?.includes('generateContent') && (m.name.includes('flash') || m.name.includes('gemini')));
+    if (found) {
+      activeGeminiModelPath = found.name; // مثل "models/gemini-2.0-flash" أو "models/gemini-1.5-flash-latest"
+      return activeGeminiModelPath;
+    }
+  } catch (e) {}
+  return 'models/gemini-2.0-flash';
+}
+
 // ============= محرك الترجمة الصارم بالتوازي (عربي حصراً) =============
 async function translateChunkStrict(texts, keys) {
   const prompt = `You are a professional subtitle translator. TARGET LANGUAGE IS ARABIC ONLY.
@@ -185,7 +202,7 @@ Rules:
 Length: ${texts.length}.
 Input: ${JSON.stringify(texts)}`;
 
-  // 1. تجربة Groq أولاً (الأسرع على الإطلاق)
+  // 1. Groq فائق السرعة
   if (keys.groqKey) {
     try {
       const r = await axios.post('https://api.groq.com/openai/v1/chat/completions', {
@@ -202,10 +219,11 @@ Input: ${JSON.stringify(texts)}`;
     } catch (e) { logErr('trans:groq', e); }
   }
 
-  // 2. تجربة Gemini كخيار أساسي أو بديل
+  // 2. Gemini مع استخراج النموذج الصالح تلقائياً لمنع 404
   if (keys.geminiKey) {
     try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${encodeURIComponent(keys.geminiKey.trim())}`;
+      const modelPath = await resolveGeminiModel(keys.geminiKey.trim());
+      const url = `https://generativelanguage.googleapis.com/v1beta/${modelPath}:generateContent?key=${encodeURIComponent(keys.geminiKey.trim())}`;
       const r = await axios.post(url, {
         contents: [{ parts: [{ text: prompt }] }],
         generationConfig: { response_mime_type: 'application/json' }
@@ -219,7 +237,7 @@ Input: ${JSON.stringify(texts)}`;
     } catch (e) { logErr('trans:gemini', e); }
   }
 
-  // 3. تجربة OpenAI
+  // 3. OpenAI
   if (keys.openaiKey) {
     try {
       const r = await axios.post('https://api.openai.com/v1/chat/completions', {
@@ -256,7 +274,6 @@ app.get(['/translate', '/translate/:filename'], async (req, res) => {
       return res.send(ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[النظام] تعذر قراءة نصوص الترجمة المصدر.`);
     }
 
-    // تقسيم الملف إلى حزم (50 سطراً) وترجمتها بالتوازي
     const CHUNK = 50;
     const chunks = [];
     for (let i = 0; i < cues.length; i += CHUNK) {
@@ -266,7 +283,7 @@ app.get(['/translate', '/translate/:filename'], async (req, res) => {
     const chunkResults = await Promise.all(chunks.map(async chunk => {
       const texts = chunk.map(c => c.text);
       const translated = await translateChunkStrict(texts, keys);
-      return translated || texts.map(() => '...'); // عدم العودة للإنجليزية نهائياً
+      return translated || texts.map(() => '...');
     }));
 
     const finalTranslations = chunkResults.flat();
@@ -278,7 +295,7 @@ app.get(['/translate', '/translate/:filename'], async (req, res) => {
   } catch (err) {
     logErr('translate-route', err);
     res.setHeader('Content-Type', 'text/x-ssa; charset=utf-8');
-    return res.send(ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[النظام] عذراً، تعثرت الترجمة الفورية بسبب بطء الاستجابة أو ضغط الخوادم.`);
+    return res.send(ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[النظام] تعثرت الترجمة الفورية، يرجى المحاولة لاحقاً.`);
   }
 });
 
@@ -492,7 +509,7 @@ app.get(['/', '/configure'], (req, res) => {
         </div>
 
         <div class="field-group">
-          <div class="label-row"><label>مفتاح Groq API (فائق السرعة):</label><a class="get-link" href="https://console.groq.com/keys" target="_blank">🔗 احصل على المفتاح</a></div>
+          <div class="label-row"><label>مفتاح Groq API (فائق السرعة وموصى به):</label><a class="get-link" href="https://console.groq.com/keys" target="_blank">🔗 احصل على المفتاح</a></div>
           <div class="input-row"><input type="text" id="groqKey" placeholder="gsk_..."><button class="btn-test" onclick="testKey('groq', 'groqKey', 'msgGroq')">فحص</button></div>
           <div id="msgGroq" class="test-msg"></div>
         </div>
