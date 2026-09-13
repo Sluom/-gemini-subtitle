@@ -59,11 +59,13 @@ function parseConfig(req) {
   const rawConfig = req.params.config;
   if (rawConfig) {
     try {
-      const decoded = Buffer.from(rawConfig, 'base64').toString('utf-8');
-      config = { ...config, ...JSON.parse(decoded) };
+      const decodedUrl = decodeURIComponent(rawConfig);
+      const decodedB64 = Buffer.from(decodedUrl, 'base64').toString('utf-8');
+      config = { ...config, ...JSON.parse(decodedB64) };
     } catch (e) {
       try {
-        config = { ...config, ...JSON.parse(decodeURIComponent(rawConfig)) };
+        const decoded = Buffer.from(rawConfig, 'base64').toString('utf-8');
+        config = { ...config, ...JSON.parse(decoded) };
       } catch (e2) {}
     }
   }
@@ -171,7 +173,7 @@ app.post('/api/test-key', async (req, res) => {
 
       if (!valid) {
         try {
-          const r2 = await axios.get('https://api.opensubtitles.com/api/v1/subtitles?imdb_id=tt0133093', {
+          const r2 = await axios.get('https://api.opensubtitles.com/api/v1/subtitles?imdb_id=0133093', {
             headers: { 'Api-Key': cleanKey, 'User-Agent': 'NuvioSubtitles v1.0' },
             timeout: 7000
           });
@@ -431,7 +433,10 @@ function renderHtml(config) {
         subdlKey: document.getElementById('subdlKey').value.trim(),
         wyzieKey: document.getElementById('wyzieKey').value.trim()
       };
-      return btoa(unescape(encodeURIComponent(JSON.stringify(payload))));
+      
+      const jsonStr = JSON.stringify(payload);
+      const b64 = btoa(unescape(encodeURIComponent(jsonStr)));
+      return encodeURIComponent(b64);
     }
 
     function installAddon() {
@@ -487,6 +492,8 @@ app.get(['/subtitles/:type/:id', '/:config/subtitles/:type/:id'], async (req, re
     const title = media.title;
     const mediaType = media.type || type;
 
+    console.log(`[SUBS] Requested ID: ${targetId}, Type: ${mediaType}, Title: ${title || 'N/A'}`);
+
     const tasks = [
       getAnimeSubtitles(targetId)
     ];
@@ -526,6 +533,8 @@ app.get(['/subtitles/:type/:id', '/:config/subtitles/:type/:id'], async (req, re
       .flatMap(r => r.value)
       .filter(s => s && s.url);
 
+    console.log(`[SUBS] Total subtitles found before filtering: ${allSubs.length}`);
+
     const formatted = allSubs.map((s, idx) => {
       let finalUrl = s.url;
 
@@ -563,8 +572,10 @@ app.get(['/subtitles/:type/:id', '/:config/subtitles/:type/:id'], async (req, re
       lang: s.lang
     }));
 
+    console.log(`[SUBS] Final unique subtitles returned to Nuvio: ${uniqueSubs.length}`);
     res.json({ subtitles: uniqueSubs });
   } catch (err) {
+    console.error(`[SUBS] Error processing request for ${targetId}:`, err.message);
     res.json({ subtitles: [] });
   }
 });
@@ -632,4 +643,6 @@ app.get('/stream-subsource', async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {});
+app.listen(PORT, () => {
+  console.log(`Server listening on port ${PORT}`);
+});
