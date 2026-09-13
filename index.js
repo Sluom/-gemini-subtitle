@@ -12,9 +12,9 @@ app.use(express.json());
 
 const manifest = {
   id: "org.nuvio.universal.gemini.subtitles",
-  version: "28.0.0",
+  version: "28.5.0",
   name: "Universal Subtitles & Gemini AI",
-  description: "جلب كافة الترجمات الشاملة المباشرة مع ترجمة فورية عربية فائقة السرعة عبر Groq و Gemini",
+  description: "جلب كافة الترجمات الشاملة المباشرة مع ترجمة فورية عربية دقيقة عبر Groq و Gemini",
   logo: "https://raw.githubusercontent.com/Sluom/-gemini-subtitle/main/logo.png",
   resources: [{ name: "subtitles", types: ["anime", "series", "movie", "other"], idPrefixes: ["kitsu", "mal", "anilist", "tt"] }],
   types: ["anime", "series", "movie", "other"],
@@ -45,7 +45,7 @@ function parseImdbId(rawId) {
 }
 
 function logErr(label, err) {
-  console.error(`[${label}] خطأ:`, err?.response?.status || err?.message || err);
+  console.error(`[${label}] خطأ:`, err?.response?.data || err?.response?.status || err?.message || err);
 }
 
 function slugify(str) {
@@ -62,16 +62,25 @@ function safeDecodeText(buf) {
   }
 }
 
-function cleanJsonText(raw) {
+// مستخرج قوي للـ JSON يتعامل مع الأخطاء النحوية وعلامات التنصيص
+function parseRobustJsonArray(raw, expectedLength) {
   if (!raw) return null;
-  let s = raw.trim();
-  s = s.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
-  const start = s.indexOf('{');
-  const end = s.lastIndexOf('}');
-  if (start !== -1 && end !== -1 && end > start) {
-    s = s.slice(start, end + 1);
+  let clean = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+
+  try {
+    const parsed = JSON.parse(clean);
+    const arr = Array.isArray(parsed) ? parsed : (parsed.translations || parsed.data || Object.values(parsed));
+    if (Array.isArray(arr) && arr.length > 0) {
+      return arr.map(x => String(x || '').trim());
+    }
+  } catch (e) {
+    // في حال فشل JSON.parse بسبب علامات الاقتباس، نستخرج النصوص برمجياً عبر Regex
+    const stringMatches = [...clean.matchAll(/"([^"\\]*(?:\\.[^"\\]*)*)"/g)].map(m => m[1]);
+    if (stringMatches.length >= expectedLength * 0.5) {
+      return stringMatches.filter(s => s !== 'translations' && s !== 'data');
+    }
   }
-  return s;
+  return null;
 }
 
 function decodeConfig(token) {
@@ -92,18 +101,10 @@ const SOURCE_LABELS = {
 };
 function sourceLabelOf(key) { return SOURCE_LABELS[key] || 'Source'; }
 
-// ============= ذاكرة التخزين المؤقت للترجمات (Cache) =============
+// كاش في الذاكرة لحفظ الترجمة فور اكتمالها
 const translationCache = new Map();
-function getCachedTranslation(key) { return translationCache.get(key); }
-function setCachedTranslation(key, val) {
-  if (translationCache.size > 60) {
-    const firstKey = translationCache.keys().next().value;
-    translationCache.delete(firstKey);
-  }
-  translationCache.set(key, val);
-}
 
-// ============= طابور التنفيذ المحدود لتجنب 429 =============
+// نظام تشغيل الحزم المحدود لتفادي حظر 429
 async function runConcurrentPool(tasks, limit = 2) {
   const results = new Array(tasks.length);
   let index = 0;
@@ -169,7 +170,7 @@ app.get(['/stream-sub', '/stream-sub/:filename'], async (req, res) => {
   }
 });
 
-// ============= استخراج وبناء أسطر الترجمة =============
+// ============= استخراج أسطر الترجمة =============
 const ASS_DEFAULT_HEADER = `[Script Info]
 ScriptType: v4.00+
 Collisions: Normal
@@ -179,7 +180,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Arial,28,&H00FFFFFF,&H000000FF,&H00000000,&H96000000,-1,0,0,0,100,100,0,0,1,2,2,2,10,10,20,1
+Style: Default,Arial,26,&H00FFFFFF,&H000000FF,&H00000000,&H96000000,-1,0,0,0,100,100,0,0,1,2,2,2,10,10,20,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -216,98 +217,59 @@ function extractCuesUniversal(text) {
   return cues;
 }
 
-let activeGeminiModelPath = null;
-async function resolveGeminiModel(key) {
-  if (activeGeminiModelPath) return activeGeminiModelPath;
-  try {
-    const r = await axios.get(`https://generativelanguage.googleapis.com/v1beta/models?key=${key}`, { timeout: 5000 });
-    const models = r.data?.models || [];
-    const found = models.find(m => m.supportedGenerationMethods?.includes('generateContent') && (m.name.includes('flash') || m.name.includes('gemini')));
-    if (found) {
-      activeGeminiModelPath = found.name;
-      return activeGeminiModelPath;
-    }
-  } catch (e) {}
-  return 'models/gemini-2.0-flash';
-}
-
-// ============= محرك الترجمة الصارم بالتوازي المنظم =============
+// ============= محرك الترجمة الفورية الصارم للعربية =============
 async function translateChunkStrict(texts, keys) {
-  const prompt = `You are a professional subtitle translator. Target Language: ARABIC ONLY.
-Translate the following JSON array of strings into natural, accurate Arabic.
+  const prompt = `You are an automated subtitle translator. Target Language: ARABIC ONLY.
+Task: Translate the JSON array of strings into Arabic.
 Rules:
-1. Return ONLY a raw JSON object with key "data" containing the translated Arabic strings array. Example: {"data": ["مرحبا", "أهلاً"]}.
-2. Keep formatting and line breaks \\N intact.
-3. NEVER output English.
+1. Return a JSON object with key "translations" containing the Arabic strings array.
+2. DO NOT use double quotes inside strings. Use single quotes or Arabic quotes.
+3. NEVER output English words.
+4. Output MUST be valid JSON format.
 Length: ${texts.length}.
 Input: ${JSON.stringify(texts)}`;
 
-  // الأولوية القصوى لـ Groq فائق السرعة
+  // 1. Groq عبر موديل 8b فائق السرعة بسقف 30,000 رمز
   if (keys.groqKey) {
     try {
       const r = await axios.post('https://api.groq.com/openai/v1/chat/completions', {
-        model: 'llama-3.3-70b-versatile',
+        model: 'llama-3.1-8b-instant',
         messages: [{ role: 'user', content: prompt }],
         response_format: { type: 'json_object' }
-      }, { headers: { Authorization: `Bearer ${keys.groqKey.trim()}`, 'Content-Type': 'application/json' }, timeout: 12000 });
-      const raw = cleanJsonText(r.data?.choices?.[0]?.message?.content);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        const data = parsed.data || parsed.translations || parsed;
-        if (Array.isArray(data) && data.length === texts.length) return data;
-      }
+      }, { headers: { Authorization: `Bearer ${keys.groqKey.trim()}`, 'Content-Type': 'application/json' }, timeout: 10000 });
+
+      const parsedArr = parseRobustJsonArray(r.data?.choices?.[0]?.message?.content, texts.length);
+      if (parsedArr && parsedArr.length > 0) return parsedArr;
     } catch (e) { logErr('trans:groq', e); }
   }
 
-  // Gemini كخيار بديل
+  // 2. Gemini الاحتياطي عبر موديل gemini-2.0-flash
   if (keys.geminiKey) {
     try {
-      const modelPath = await resolveGeminiModel(keys.geminiKey.trim());
-      const url = `https://generativelanguage.googleapis.com/v1beta/${modelPath}:generateContent?key=${encodeURIComponent(keys.geminiKey.trim())}`;
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${encodeURIComponent(keys.geminiKey.trim())}`;
       const r = await axios.post(url, {
         contents: [{ parts: [{ text: prompt }] }],
         generationConfig: { response_mime_type: 'application/json' }
-      }, { headers: { 'Content-Type': 'application/json' }, timeout: 15000 });
-      const raw = cleanJsonText(r.data?.candidates?.[0]?.content?.parts?.[0]?.text);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        const data = parsed.data || parsed.translations || parsed;
-        if (Array.isArray(data) && data.length === texts.length) return data;
-      }
-    } catch (e) { logErr('trans:gemini', e); }
-  }
+      }, { headers: { 'Content-Type': 'application/json' }, timeout: 12000 });
 
-  // OpenAI كخيار إضافي
-  if (keys.openaiKey) {
-    try {
-      const r = await axios.post('https://api.openai.com/v1/chat/completions', {
-        model: 'gpt-4o-mini',
-        messages: [{ role: 'user', content: prompt }],
-        response_format: { type: 'json_object' }
-      }, { headers: { Authorization: `Bearer ${keys.openaiKey.trim()}` }, timeout: 15000 });
-      const raw = cleanJsonText(r.data?.choices?.[0]?.message?.content);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        const data = parsed.data || parsed;
-        if (Array.isArray(data) && data.length === texts.length) return data;
-      }
-    } catch (e) { logErr('trans:openai', e); }
+      const parsedArr = parseRobustJsonArray(r.data?.candidates?.[0]?.content?.parts?.[0]?.text, texts.length);
+      if (parsedArr && parsedArr.length > 0) return parsedArr;
+    } catch (e) { logErr('trans:gemini', e); }
   }
 
   return null;
 }
 
-// مسار معالجة وترجمة الملف الفوري
+// مسار الترجمة الفورية الشامل
 app.get(['/translate', '/translate/:filename'], async (req, res) => {
   const { subUrl, geminiKey, groqKey, openaiKey, deeplKey } = req.query;
   if (!subUrl) return res.status(400).send("No Subtitle URL");
 
-  const cacheKey = `${subUrl}_${groqKey ? 'groq' : 'gemini'}`;
-  const cachedData = getCachedTranslation(cacheKey);
-  if (cachedData) {
+  const cacheKey = `${subUrl}_translated_ar`;
+  if (translationCache.has(cacheKey)) {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Content-Type', 'text/x-ssa; charset=utf-8');
-    return res.send(cachedData);
+    return res.send(translationCache.get(cacheKey));
   }
 
   const keys = { geminiKey, groqKey, openaiKey, deeplKey };
@@ -322,26 +284,26 @@ app.get(['/translate', '/translate/:filename'], async (req, res) => {
       return res.send(ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[النظام] تعذر استخراج نصوص الترجمة المصدر.`);
     }
 
-    // تقسيم النصوص إلى حزم من 80 سطراً (حوالي 6 إلى 8 حزم للحلقة)
-    const CHUNK = 80;
+    // حزم محكمة من 40 سطراً لضمان دقة الاستجابة
+    const CHUNK = 40;
     const chunks = [];
     for (let i = 0; i < cues.length; i += CHUNK) {
       chunks.push(cues.slice(i, i + CHUNK));
     }
 
-    // إرسال حزمتين فقط بالتوازي (Concurrency = 2) لمنع حظر 429
     const tasks = chunks.map(chunk => async () => {
       const texts = chunk.map(c => c.text);
       const translated = await translateChunkStrict(texts, keys);
-      return translated || texts; // في حال تعثر حزمة، لا نمسح النص بنقاط
+      // في حال تعذر ترجمة سطر لا نرجع الإنجليزية أبداً
+      return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : "ـ");
     });
 
     const chunkResults = await runConcurrentPool(tasks, 2);
     const finalTranslations = chunkResults.flat();
-    const assLines = cues.map((c, idx) => `Dialogue: 0,${c.start},${c.end},Default,,0,0,0,,${finalTranslations[idx] || c.text}`);
+    const assLines = cues.map((c, idx) => `Dialogue: 0,${c.start},${c.end},Default,,0,0,0,,${finalTranslations[idx] || 'ـ'}`);
 
     const finalAssOutput = ASS_DEFAULT_HEADER + assLines.join('\n') + '\n';
-    setCachedTranslation(cacheKey, finalAssOutput);
+    translationCache.set(cacheKey, finalAssOutput);
 
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Content-Type', 'text/x-ssa; charset=utf-8');
@@ -349,7 +311,7 @@ app.get(['/translate', '/translate/:filename'], async (req, res) => {
   } catch (err) {
     logErr('translate-route', err);
     res.setHeader('Content-Type', 'text/x-ssa; charset=utf-8');
-    return res.send(ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[النظام] تعثرت الترجمة الفورية.`);
+    return res.send(ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[النظام] تعثرت معالجة الترجمة الفورية.`);
   }
 });
 
@@ -563,7 +525,7 @@ app.get(['/', '/configure'], (req, res) => {
         </div>
 
         <div class="field-group">
-          <div class="label-row"><label>مفتاح Groq API (فائق السرعة وموصى به):</label><a class="get-link" href="https://console.groq.com/keys" target="_blank">🔗 احصل على المفتاح</a></div>
+          <div class="label-row"><label>مفتاح Groq API (فائق السرعة):</label><a class="get-link" href="https://console.groq.com/keys" target="_blank">🔗 احصل على المفتاح</a></div>
           <div class="input-row"><input type="text" id="groqKey" placeholder="gsk_..."><button class="btn-test" onclick="testKey('groq', 'groqKey', 'msgGroq')">فحص</button></div>
           <div id="msgGroq" class="test-msg"></div>
         </div>
