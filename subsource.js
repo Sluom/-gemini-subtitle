@@ -1,106 +1,78 @@
 const axios = require('axios');
 
-const USER_AGENTS = [
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15',
-  'Mozilla/5.0 (X11; Linux x86_64; rv:123.0) Gecko/20100101 Firefox/123.0'
-];
-
-function getRandomUA() {
-  return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
-}
-
-function getAxiosConfig(extraHeaders = {}) {
+function getHeaders(apiKey) {
   return {
-    headers: {
-      'User-Agent': getRandomUA(),
-      'Accept': '*/*',
-      ...extraHeaders
-    },
-    timeout: 7000
+    'X-API-Key': apiKey ? apiKey.trim() : '',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+    'Accept': 'application/json'
   };
 }
 
-function cleanTitle(raw) {
-  if (!raw) return '';
-  return raw
-    .replace(/\(\d{4}\)/g, '')
-    .replace(/[^\w\s\u0600-\u06FF]/gi, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function isMatchingEpisode(text, season, episode) {
-  if (episode === null || episode === undefined) return true;
-  const ep = parseInt(episode, 10);
-  const s = season ? parseInt(season, 10) : 1;
-  const pattern = new RegExp(`(?:s0*${s}[._ -]*e0*${ep}|${s}x0*${ep}|(?:^|[^a-z0-9])(?:e|ep|episode)[._ -]*0*${ep}(?:[^a-z0-9]|$)|(?:\\[|\\(|-|\\s)0*${ep}(?:\\]|\\)|-|\\s|$))`, 'i');
-  return pattern.test(text);
-}
-
-async function findMovieId(imdbId, title, apiKey) {
-  const headers = { 'X-API-Key': apiKey.trim() };
-
-  if (imdbId && imdbId.startsWith('tt')) {
-    try {
-      const r = await axios.get(`https://api.subsource.net/api/v1/movies/search?query=${encodeURIComponent(imdbId)}`, getAxiosConfig(headers));
-      const list = r.data?.data || r.data?.movies || [];
-      if (list.length > 0) {
-        return list[0].movieId || list[0].id;
-      }
-    } catch (e) {}
-  }
-
-  const query = cleanTitle(title);
-  if (!query) return null;
-
-  try {
-    const r = await axios.get(`https://api.subsource.net/api/v1/movies/search?query=${encodeURIComponent(query)}`, getAxiosConfig(headers));
-    const list = r.data?.data || r.data?.movies || [];
-    if (list.length > 0) {
-      return list[0].movieId || list[0].id;
-    }
-  } catch (e) {}
-
-  return null;
-}
-
-async function getSubSource({ title, imdbId, season, episode, type, apiKey }) {
+async function getSubSource({ title, imdbId, season, episode, apiKey }) {
   if (!apiKey) return [];
 
   try {
-    const movieId = await findMovieId(imdbId, title, apiKey);
-    if (!movieId) return [];
-
-    const headers = { 'X-API-Key': apiKey.trim() };
-    const r = await axios.get(
-      `https://api.subsource.net/api/v1/subtitles?movieId=${movieId}&language=arabic&sort=newest&limit=30`,
-      getAxiosConfig(headers)
-    );
-
-    let list = r.data?.data || r.data?.subtitles || [];
-    if (!Array.isArray(list) || list.length === 0) return [];
-
-    if (season || episode) {
-      const filtered = list.filter(item => {
-        const info = Array.isArray(item.releaseInfo) ? item.releaseInfo.join(' ') : (item.releaseInfo || '');
-        const comment = item.comment || '';
-        return isMatchingEpisode(`${info} ${comment}`, season, episode);
-      });
-      if (filtered.length > 0) list = filtered;
+    let searchUrl = '';
+    if (imdbId && imdbId.startsWith('tt')) {
+      searchUrl = `https://api.subsource.net/api/v1/movies/search?query=${imdbId}&searchType=imdb`;
+    } else if (title) {
+      searchUrl = `https://api.subsource.net/api/v1/movies/search?query=${encodeURIComponent(title)}&searchType=text`;
+    } else {
+      return [];
     }
 
-    return list.slice(0, 10).map(s => {
-      const subId = s.subtitleId || s.id;
-      const release = Array.isArray(s.releaseInfo) ? s.releaseInfo.join(' ') : (s.releaseInfo || 'SubSource');
-      const format = (s.format || 'srt').toLowerCase();
+    const searchRes = await axios.get(searchUrl, { 
+      headers: getHeaders(apiKey), 
+      timeout: 7000 
+    });
+
+    const movies = searchRes.data?.data || searchRes.data?.movies || [];
+    if (!movies.length) return [];
+
+    const movie = movies[0];
+    const movieSlug = movie.slug || movie.id;
+    if (!movieSlug) return [];
+
+    const subsUrl = `https://api.subsource.net/api/v1/movies/${movieSlug}/subtitles?langs=Arabic,English`;
+    const subsRes = await axios.get(subsUrl, { 
+      headers: getHeaders(apiKey), 
+      timeout: 7000 
+    });
+
+    let list = subsRes.data?.data || subsRes.data?.subtitles || [];
+    if (!Array.isArray(list)) return [];
+
+    if (season && episode) {
+      const sNum = parseInt(season, 10);
+      const eNum = parseInt(episode, 10);
+      const epRegex = new RegExp(`(?:s0*${sNum}[._ -]*)?(?:e|ep|episode)[._ -]*0*${eNum}(?:[^0-9]|$)`, 'i');
+
+      const filtered = list.filter(item => {
+        if (item.season && item.episode) {
+          return parseInt(item.season, 10) === sNum && parseInt(item.episode, 10) === eNum;
+        }
+        const name = item.release_name || item.name || '';
+        return epRegex.test(name);
+      });
+
+      if (filtered.length > 0) {
+        list = filtered;
+      }
+    }
+
+    return list.map(item => {
+      const subId = item.id || item.subId || item.link;
+      const langRaw = (item.lang || item.language || '').toLowerCase();
+      const isArabic = langRaw.includes('ar') || langRaw.includes('عرب');
+      const releaseName = item.release_name || item.name || 'SubSource';
+      const isAss = releaseName.toLowerCase().endsWith('.ass');
+
       return {
-        url: `subsource://${subId}.${format}?apiKey=${encodeURIComponent(apiKey.trim())}`,
-        lang: 'ara',
-        origName: release,
+        url: `subsource://${movieSlug}/${subId}?key=${encodeURIComponent(apiKey)}&ext=${isAss ? 'ass' : 'srt'}`,
+        lang: isArabic ? 'ara' : 'eng',
+        origName: releaseName,
         _source: 'subsource',
-        _priority: 2,
-        _ext: format
+        _priority: 2
       };
     });
   } catch (err) {
@@ -108,29 +80,52 @@ async function getSubSource({ title, imdbId, season, episode, type, apiKey }) {
   }
 }
 
-async function fetchSubSourceBuffer(customUrl) {
-  const match = customUrl.match(/^subsource:\/\/([^.?]+)(?:\.([^?]+))?(?:\?apiKey=(.+))?$/);
-  if (!match) throw new Error('Invalid SubSource URL');
+async function fetchSubSourceBuffer(subsourceCustomUrl) {
+  try {
+    const raw = subsourceCustomUrl.replace('subsource://', 'http://dummy/');
+    const parsed = new URL(raw);
+    const parts = parsed.pathname.split('/').filter(Boolean);
+    const movieSlug = parts[0];
+    const subId = parts[1];
+    const apiKey = parsed.searchParams.get('key') || '';
 
-  const subId = match[1];
-  const apiKey = decodeURIComponent(match[3] || '');
-  if (!apiKey) throw new Error('Missing API Key');
+    if (!subId) return Buffer.from('');
 
-  const dl = await axios.get(
-    `https://api.subsource.net/api/v1/subtitles/${subId}/download`,
-    getAxiosConfig({ 'X-API-Key': apiKey.trim() })
-  );
+    const headers = getHeaders(apiKey);
 
-  const directLink = dl.data?.data?.downloadUrl || dl.data?.data?.link || dl.data?.downloadUrl || dl.data?.link;
-  if (!directLink) throw new Error('No download link found');
+    try {
+      const res = await axios.post(
+        'https://api.subsource.net/api/v1/subtitles/download',
+        { subId: subId },
+        { headers, timeout: 8000 }
+      );
 
-  const fileRes = await axios.get(directLink, {
-    responseType: 'arraybuffer',
-    timeout: 10000,
-    headers: { 'User-Agent': getRandomUA(), 'Accept': '*/*' }
-  });
+      const downloadUrl = res.data?.data?.downloadUrl || res.data?.downloadUrl || res.data?.url;
+      if (downloadUrl) {
+        const fileRes = await axios.get(downloadUrl, {
+          responseType: 'arraybuffer',
+          timeout: 10000,
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+          }
+        });
+        return Buffer.from(fileRes.data);
+      }
+    } catch (e) {}
 
-  return Buffer.from(fileRes.data);
+    const directRes = await axios.get(
+      `https://api.subsource.net/api/v1/subtitles/${subId}/download`,
+      {
+        headers,
+        responseType: 'arraybuffer',
+        timeout: 10000
+      }
+    );
+
+    return Buffer.from(directRes.data);
+  } catch (err) {
+    return Buffer.from('');
+  }
 }
 
 module.exports = { getSubSource, fetchSubSourceBuffer };
