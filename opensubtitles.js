@@ -17,11 +17,10 @@ function getAxiosConfig(extraHeaders = {}) {
       'Accept': '*/*',
       ...extraHeaders
     },
-    timeout: 10000
+    timeout: 8000
   };
 }
 
-// جلب الترجمات عبر OpenSubtitles REST API الرسمي
 async function fetchOpenSubOfficial(imdbId, season, episode, apiKey) {
   if (!apiKey || !imdbId || !imdbId.startsWith('tt')) return [];
 
@@ -39,13 +38,11 @@ async function fetchOpenSubOfficial(imdbId, season, episode, apiKey) {
       getAxiosConfig({ 'Api-Key': apiKey.trim() })
     );
 
-    const items = res.data?.data || [];
-    const results = [];
-
-    for (const item of items) {
+    const items = (res.data?.data || []).slice(0, 3);
+    const downloadTasks = items.map(async (item) => {
       const fileId = item.attributes?.files?.[0]?.file_id;
-      const fileName = item.attributes?.files?.[0]?.file_name || item.attributes?.release || 'OpenSubtitles';
-      if (!fileId) continue;
+      const fileName = item.attributes?.files?.[0]?.file_name || item.attributes?.release || 'OpenSubtitles VIP';
+      if (!fileId) return null;
 
       try {
         const dlRes = await axios.post(
@@ -58,27 +55,29 @@ async function fetchOpenSubOfficial(imdbId, season, episode, apiKey) {
         );
 
         if (dlRes.data?.link) {
-          results.push({
+          return {
             url: dlRes.data.link,
             lang: item.attributes?.language || 'ara',
             origName: fileName,
             _source: 'opensub-official',
             _priority: 1
-          });
+          };
         }
-      } catch (dlErr) {
-        // تجاوز الروابط المقفلة لحسابات التنزيل
+      } catch (e) {
+        return null;
       }
-    }
+      return null;
+    });
 
-    return results;
+    const settled = await Promise.allSettled(downloadTasks);
+    return settled
+      .filter(r => r.status === 'fulfilled' && r.value)
+      .map(r => r.value);
   } catch (err) {
-    console.error('[opensub:official] خطأ:', err?.response?.status || err?.message);
     return [];
   }
 }
 
-// جلب الترجمات من مرايا Stremio المفتوحة لـ OpenSubtitles
 async function fetchOpenSubMirror(url, sourceKey) {
   try {
     const res = await axios.get(url, getAxiosConfig());
@@ -87,7 +86,7 @@ async function fetchOpenSubMirror(url, sourceKey) {
     return subs.map(s => ({
       url: s.url,
       lang: s.lang || 'ara',
-      origName: s.title || s.SubFileName || s.name || 'OpenSubtitles Mirror',
+      origName: s.title || s.SubFileName || s.name || 'OpenSubtitles',
       _source: sourceKey,
       _priority: 2
     }));
@@ -96,18 +95,18 @@ async function fetchOpenSubMirror(url, sourceKey) {
   }
 }
 
-// الدالة الموحدة المستدعاة من السيرفر الرئيسي
-async function getOpenSubtitles({ imdbId, season, episode, type, targetId, apiKey }) {
-  const requests = [];
+async function getOpenSubtitles({ imdbId, season, episode, type, apiKey }) {
+  if (!imdbId || !imdbId.startsWith('tt')) return [];
 
-  // 1. المرايا المفتوحة السريعة
-  requests.push(
-    fetchOpenSubMirror(`https://opensubtitles-v3.strem.io/subtitles/${type}/${targetId}.json`, 'opensub-v3'),
-    fetchOpenSubMirror(`https://opensubtitles.strem.fun/subtitles/${type}/${targetId}.json`, 'opensub-fun')
-  );
+  const mediaType = season ? 'series' : (type === 'series' ? 'series' : 'movie');
+  const mirrorTargetId = season ? `${imdbId}:${season}:${episode || 1}` : imdbId;
 
-  // 2. الحساب الرسمي في حال توفر المفتاح
-  if (apiKey && imdbId) {
+  const requests = [
+    fetchOpenSubMirror(`https://opensubtitles-v3.strem.io/subtitles/${mediaType}/${mirrorTargetId}.json`, 'opensub-v3'),
+    fetchOpenSubMirror(`https://opensubtitles.strem.fun/subtitles/${mediaType}/${mirrorTargetId}.json`, 'opensub-fun')
+  ];
+
+  if (apiKey) {
     requests.push(fetchOpenSubOfficial(imdbId, season, episode, apiKey));
   }
 
