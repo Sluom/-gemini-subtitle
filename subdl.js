@@ -33,7 +33,7 @@ async function fetchSubDLv2(imdbId, season, episode, apiKey) {
     if (season) params.set('season_number', String(season));
     if (episode) params.set('episode_number', String(episode));
 
-    const r = await axios.get(`https://api.subdl.com/api/v2/subtitles/search?${params.toString()}`, getAxiosConfig());
+    const r = await axios.get(`https://api.subdl.com/api/v2/subtitles?${params.toString()}`, getAxiosConfig());
     const subs = r.data?.subtitles || r.data?.results || [];
     return subs
       .filter(s => s && (s.url || s.download_url || s.file_url))
