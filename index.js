@@ -154,20 +154,63 @@ app.post('/api/test-key', async (req, res) => {
       });
       if (r.status === 200) return res.json({ success: true, message: 'مفتاح Jimaku صالح 100% ✅' });
     } else if (provider === 'subsource') {
-      const r = await axios.get('https://api.subsource.net/api/v1/movies/search?query=avatar', {
+      const r = await axios.get('https://api.subsource.net/api/v1/movies/search?query=avatar&searchType=text', {
         headers: { 'X-API-Key': cleanKey },
         timeout: 7000
       });
       if (r.status === 200) return res.json({ success: true, message: 'مفتاح SubSource صالح 100% ✅' });
     } else if (provider === 'opensubtitles') {
-      const r = await axios.get('https://api.opensubtitles.com/api/v1/infos/user', {
-        headers: { 'Api-Key': cleanKey, 'User-Agent': 'NuvioSubtitles v1.0' },
-        timeout: 7000
-      });
-      if (r.status === 200) return res.json({ success: true, message: 'مفتاح OpenSubtitles صالح 100% ✅' });
+      let valid = false;
+      try {
+        const r1 = await axios.get('https://api.opensubtitles.com/api/v1/infos/formats', {
+          headers: { 'Api-Key': cleanKey, 'User-Agent': 'NuvioSubtitles v1.0' },
+          timeout: 7000
+        });
+        if (r1.status === 200) valid = true;
+      } catch (e1) {}
+
+      if (!valid) {
+        try {
+          const r2 = await axios.get('https://api.opensubtitles.com/api/v1/subtitles?imdb_id=tt0133093', {
+            headers: { 'Api-Key': cleanKey, 'User-Agent': 'NuvioSubtitles v1.0' },
+            timeout: 7000
+          });
+          if (r2.status === 200) valid = true;
+        } catch (e2) {}
+      }
+
+      if (valid) return res.json({ success: true, message: 'مفتاح OpenSubtitles صالح 100% ✅' });
     } else if (provider === 'subdl') {
-      const r = await axios.get(`https://api.subdl.com/api/v2/subtitles?api_key=${cleanKey}&imdb_id=tt0111161`, { timeout: 7000 });
-      if (r.data?.status === true || r.status === 200) return res.json({ success: true, message: 'مفتاح SubDL صالح 100% ✅' });
+      let valid = false;
+      try {
+        const r1 = await axios.get(`https://api.subdl.com/api/v1/subtitles?api_key=${cleanKey}&imdb_id=tt0111161`, {
+          headers: { 'Authorization': `Bearer ${cleanKey}`, 'X-API-Key': cleanKey },
+          timeout: 7000
+        });
+        if (r1.status === 200 && (r1.data?.status === true || r1.data?.results)) valid = true;
+      } catch (e1) {}
+
+      if (!valid) {
+        try {
+          const r2 = await axios.get('https://api.subdl.com/api/v2/me', {
+            headers: { 'Authorization': `Bearer ${cleanKey}`, 'X-API-Key': cleanKey },
+            timeout: 7000
+          });
+          if (r2.status === 200 || r2.data?.status === true) valid = true;
+        } catch (e2) {}
+      }
+
+      if (!valid) {
+        try {
+          const r3 = await axios.get('https://api.subdl.com/api/v1/subtitles?film_name=Inception&languages=EN', {
+            headers: { 'Authorization': `Bearer ${cleanKey}`, 'X-API-Key': cleanKey },
+            timeout: 7000
+          });
+          if (r3.status === 200 && (r3.data?.status === true || r3.data?.results)) valid = true;
+        } catch (e3) {}
+      }
+
+      if (valid) return res.json({ success: true, message: 'مفتاح SubDL صالح 100% ✅' });
     } else if (provider === 'wyzie') {
       if (cleanKey.length > 10) return res.json({ success: true, message: 'مفتاح Wyzie Subs صالح 100% ✅' });
     }
