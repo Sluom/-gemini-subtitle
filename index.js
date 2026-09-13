@@ -5,6 +5,12 @@ const AdmZip = require('adm-zip');
 const iconv = require('iconv-lite');
 const zlib = require('zlib');
 
+const { getOpenSubtitles } = require('./opensubtitles');
+const { getSubDL } = require('./subdl');
+const { getSubSource } = require('./subsource');
+const { getAnimeSubtitles } = require('./anime');
+const { handleTranslation } = require('./translator');
+
 const app = express();
 app.set('trust proxy', true);
 app.use(cors());
@@ -22,15 +28,14 @@ const manifest = {
   catalogs: []
 };
 
-// ============= تدوير وكلاء المستخدم والاتصال =============
 const USER_AGENTS = [
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15',
   'Mozilla/5.0 (X11; Linux x86_64; rv:123.0) Gecko/20100101 Firefox/123.0'
 ];
-function getRandomUA() { return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)]; }
-function getAxiosConfig(extraHeaders = {}) {
-  return { headers: { 'User-Agent': getRandomUA(), 'Accept': '*/*', ...extraHeaders }, timeout: 12000 };
+
+function getRandomUA() {
+  return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
 }
 
 function base64UrlDecode(str) {
@@ -41,11 +46,11 @@ function base64UrlDecode(str) {
 
 function parseImdbId(rawId) {
   const parts = rawId.split(':');
-  return { imdbId: parts[0], season: parts[1] ? parseInt(parts[1]) : null, episode: parts[2] ? parseInt(parts[2]) : null };
-}
-
-function logErr(label, err) {
-  console.error(`[${label}] خطأ:`, err?.response?.data || err?.response?.status || err?.message || err);
+  return {
+    imdbId: parts[0],
+    season: parts[1] ? parseInt(parts[1]) : null,
+    episode: parts[2] ? parseInt(parts[2]) : null
+  };
 }
 
 function slugify(str) {
@@ -57,28 +62,12 @@ function safeDecodeText(buf) {
   try {
     return new TextDecoder('utf-8', { fatal: true }).decode(buf);
   } catch (e) {
-    try { return iconv.decode(buf, 'win1256'); }
-    catch (e2) { return buf.toString('utf8'); }
-  }
-}
-
-function parseRobustJsonArray(raw, expectedLength) {
-  if (!raw) return null;
-  let clean = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
-
-  try {
-    const parsed = JSON.parse(clean);
-    const arr = Array.isArray(parsed) ? parsed : (parsed.translations || parsed.data || Object.values(parsed));
-    if (Array.isArray(arr) && arr.length > 0) {
-      return arr.map(x => String(x || '').trim());
-    }
-  } catch (e) {
-    const stringMatches = [...clean.matchAll(/"([^"\\]*(?:\\.[^"\\]*)*)"/g)].map(m => m[1]);
-    if (stringMatches.length >= expectedLength * 0.5) {
-      return stringMatches.filter(s => s !== 'translations' && s !== 'data');
+    try {
+      return iconv.decode(buf, 'win1256');
+    } catch (e2) {
+      return buf.toString('utf8');
     }
   }
-  return null;
 }
 
 function decodeConfig(token) {
@@ -86,40 +75,31 @@ function decodeConfig(token) {
   if (!token) return keys;
   try {
     const p = JSON.parse(base64UrlDecode(token));
-    Object.keys(keys).forEach(k => { if (p[k] !== undefined) keys[k] = k === 'limit' ? parseInt(p[k]) : p[k]; });
-  } catch (e) { logErr('config:decode', e); }
+    Object.keys(keys).forEach(k => {
+      if (p[k] !== undefined) keys[k] = k === 'limit' ? parseInt(p[k]) : p[k];
+    });
+  } catch (e) {}
   return keys;
 }
 
 const SOURCE_LABELS = {
-  'opensub-v3': 'OpenSubtitles', 'opensub-fun': 'OpenSubtitles', 'opensub-official': 'OpenSubtitles (VIP)',
-  'subdl-mirror': 'SubDL', 'subdl-official': 'SubDL', 'subdl-v2': 'SubDL (Subscene)', 'yify': 'YIFY',
-  'anime-subs': 'AnimeSubs', 'kitsunekko': 'Kitsunekko', 'subanime': 'SubAnime', 'animetosho': 'AnimeTosho',
-  'wyzie': 'Wyzie', 'subsource': 'SubSource', 'jimaku': 'Jimaku', 'gestdown': 'Addic7ed'
+  'opensub-v3': 'OpenSubtitles',
+  'opensub-fun': 'OpenSubtitles',
+  'opensub-official': 'OpenSubtitles VIP',
+  'subdl-mirror': 'SubDL',
+  'subdl-official': 'SubDL Archive',
+  'subdl-v2': 'SubDL',
+  'yify': 'YIFY',
+  'anime-subs': 'AnimeSubs',
+  'kitsunekko': 'Kitsunekko',
+  'subsource': 'SubSource',
+  'jimaku': 'Jimaku'
 };
-function sourceLabelOf(key) { return SOURCE_LABELS[key] || 'Source'; }
 
-const translationCache = new Map();
-
-async function runConcurrentPool(tasks, limit = 2) {
-  const results = new Array(tasks.length);
-  let index = 0;
-  async function worker() {
-    while (index < tasks.length) {
-      const current = index++;
-      try {
-        results[current] = await tasks[current]();
-      } catch (err) {
-        results[current] = null;
-      }
-    }
-  }
-  const workers = Array.from({ length: Math.min(limit, tasks.length) }, () => worker());
-  await Promise.all(workers);
-  return results;
+function sourceLabelOf(key) {
+  return SOURCE_LABELS[key] || 'Source';
 }
 
-// ============= بروكسي البث المباشر الموحّد =============
 app.get(['/stream-sub', '/stream-sub/:filename'], async (req, res) => {
   const { url, ep } = req.query;
   if (!url) return res.status(400).send("No URL");
@@ -146,7 +126,7 @@ app.get(['/stream-sub', '/stream-sub/:filename'], async (req, res) => {
           chosen = entries.find(e => /\.ass$/i.test(e.entryName)) || chosen;
           buffer = chosen.getData();
         }
-      } catch (e) { logErr('stream:zip', e); }
+      } catch (e) {}
     }
 
     if (buffer.length > 2 && buffer[0] === 0x1f && buffer[1] === 0x8b) {
@@ -161,283 +141,31 @@ app.get(['/stream-sub', '/stream-sub/:filename'], async (req, res) => {
     res.setHeader('Content-Type', isAss ? 'text/x-ssa; charset=utf-8' : 'text/plain; charset=utf-8');
     return res.send(decodedText);
   } catch (err) {
-    logErr('stream-sub', err);
     return res.redirect(url);
   }
 });
-
-// ============= استخراج أسطر الترجمة =============
-const ASS_DEFAULT_HEADER = `[Script Info]
-ScriptType: v4.00+
-Collisions: Normal
-PlayDepth: 0
-WrapStyle: 0
-ScaledBorderAndShadow: yes
-
-[V4+ Styles]
-Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Arial,26,&H00FFFFFF,&H000000FF,&H00000000,&H96000000,-1,0,0,0,100,100,0,0,1,2,2,2,10,10,20,1
-
-[Events]
-Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
-`;
-
-function srtTimeToAss(t) {
-  const m = t.match(/(\d+):(\d{2}):(\d{2}),(\d{3})/);
-  if (!m) return '0:00:00.00';
-  const h = parseInt(m[1], 10), cs = Math.floor(parseInt(m[4], 10) / 10).toString().padStart(2, '0');
-  return `${h}:${m[2]}:${m[3]}.${cs}`;
-}
-
-function extractCuesUniversal(text) {
-  const assLines = text.split(/\r?\n/).filter(l => /^Dialogue:/i.test(l.trim()));
-  if (assLines.length > 0) {
-    const cues = [];
-    for (const line of assLines) {
-      const m = line.match(/^Dialogue:\s*[^,]*,([^,]*),([^,]*),(?:[^,]*,){6}(.*)$/i);
-      if (m) cues.push({ start: m[1].trim(), end: m[2].trim(), text: m[3] });
-    }
-    if (cues.length) return cues;
-  }
-  const blocks = text.replace(/\r/g, '').split(/\n\s*\n+/);
-  const cues = [];
-  for (const block of blocks) {
-    const lines = block.split('\n').filter(l => l.trim().length);
-    if (lines.length < 2) continue;
-    let idx = /^\d+$/.test(lines[0].trim()) ? 1 : 0;
-    const tm = (lines[idx] || '').match(/(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})/);
-    if (!tm) continue;
-    const text2 = lines.slice(idx + 1).join('\\N');
-    if (text2.trim()) cues.push({ start: srtTimeToAss(tm[1]), end: srtTimeToAss(tm[2]), text: text2 });
-  }
-  return cues;
-}
-
-// ============= محرك الترجمة الفورية للعربية =============
-async function translateChunkStrict(texts, keys) {
-  const prompt = `You are an automated subtitle translator. Target Language: ARABIC ONLY.
-Task: Translate the JSON array of strings into Arabic.
-Rules:
-1. Return a JSON object with key "translations" containing the Arabic strings array.
-2. DO NOT use double quotes inside strings.
-3. NEVER output English words.
-Length: ${texts.length}.
-Input: ${JSON.stringify(texts)}`;
-
-  if (keys.groqKey) {
-    try {
-      const r = await axios.post('https://api.groq.com/openai/v1/chat/completions', {
-        model: 'llama-3.1-8b-instant',
-        messages: [{ role: 'user', content: prompt }],
-        response_format: { type: 'json_object' }
-      }, { headers: { Authorization: `Bearer ${keys.groqKey.trim()}`, 'Content-Type': 'application/json' }, timeout: 10000 });
-
-      const parsedArr = parseRobustJsonArray(r.data?.choices?.[0]?.message?.content, texts.length);
-      if (parsedArr && parsedArr.length > 0) return parsedArr;
-    } catch (e) { logErr('trans:groq', e); }
-  }
-
-  if (keys.geminiKey) {
-    try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${encodeURIComponent(keys.geminiKey.trim())}`;
-      const r = await axios.post(url, {
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { response_mime_type: 'application/json' }
-      }, { headers: { 'Content-Type': 'application/json' }, timeout: 12000 });
-
-      const parsedArr = parseRobustJsonArray(r.data?.candidates?.[0]?.content?.parts?.[0]?.text, texts.length);
-      if (parsedArr && parsedArr.length > 0) return parsedArr;
-    } catch (e) { logErr('trans:gemini', e); }
-  }
-
-  return null;
-}
 
 app.get(['/translate', '/translate/:filename'], async (req, res) => {
   const { subUrl, geminiKey, groqKey, openaiKey, deeplKey } = req.query;
   if (!subUrl) return res.status(400).send("No Subtitle URL");
 
-  const cacheKey = `${subUrl}_translated_ar`;
-  if (translationCache.has(cacheKey)) {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Content-Type', 'text/x-ssa; charset=utf-8');
-    return res.send(translationCache.get(cacheKey));
-  }
-
-  const keys = { geminiKey, groqKey, openaiKey, deeplKey };
-
   try {
-    const r = await axios.get(subUrl, { responseType: 'arraybuffer', timeout: 10000, headers: { 'User-Agent': getRandomUA() } });
-    const originalText = safeDecodeText(Buffer.from(r.data));
-    const cues = extractCuesUniversal(originalText);
-
-    if (!cues.length) {
-      res.setHeader('Content-Type', 'text/x-ssa; charset=utf-8');
-      return res.send(ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[النظام] تعذر استخراج نصوص الترجمة المصدر.`);
-    }
-
-    const CHUNK = 40;
-    const chunks = [];
-    for (let i = 0; i < cues.length; i += CHUNK) {
-      chunks.push(cues.slice(i, i + CHUNK));
-    }
-
-    const tasks = chunks.map(chunk => async () => {
-      const texts = chunk.map(c => c.text);
-      const translated = await translateChunkStrict(texts, keys);
-      return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : "ـ");
-    });
-
-    const chunkResults = await runConcurrentPool(tasks, 2);
-    const finalTranslations = chunkResults.flat();
-    const assLines = cues.map((c, idx) => `Dialogue: 0,${c.start},${c.end},Default,,0,0,0,,${finalTranslations[idx] || 'ـ'}`);
-
-    const finalAssOutput = ASS_DEFAULT_HEADER + assLines.join('\n') + '\n';
-    translationCache.set(cacheKey, finalAssOutput);
-
+    const keys = { geminiKey, groqKey, openaiKey, deeplKey };
+    const assOutput = await handleTranslation(subUrl, keys);
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Content-Type', 'text/x-ssa; charset=utf-8');
-    return res.send(finalAssOutput);
+    return res.send(assOutput);
   } catch (err) {
-    logErr('translate-route', err);
-    res.setHeader('Content-Type', 'text/x-ssa; charset=utf-8');
-    return res.send(ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[النظام] تعثرت معالجة الترجمة الفورية.`);
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    return res.status(500).send("Translation Failed");
   }
 });
 
-// ============= دوال جلب الترجمات الشاملة =============
-async function fetchOpenSubtitlesDirect(imdbId, season, episode, apiKey) {
-  if (!apiKey) return [];
-  try {
-    const params = new URLSearchParams({ imdb_id: imdbId.replace('tt', ''), languages: 'ar,en' });
-    if (season) params.set('season_number', season);
-    if (episode) params.set('episode_number', episode);
-
-    const r = await axios.get(`https://api.opensubtitles.com/api/v1/subtitles?${params.toString()}`, getAxiosConfig({ 'Api-Key': apiKey.trim() }));
-    const items = r.data?.data || [];
-    const out = [];
-    for (const item of items) {
-      const fId = item.attributes?.files?.[0]?.file_id;
-      if (!fId) continue;
-      try {
-        const dl = await axios.post('https://api.opensubtitles.com/api/v1/download', { file_id: fId }, getAxiosConfig({ 'Api-Key': apiKey.trim(), 'Content-Type': 'application/json' }));
-        if (dl.data?.link) {
-          out.push({
-            url: dl.data.link,
-            lang: item.attributes.language || 'ara',
-            origName: item.attributes.release || item.attributes.files?.[0]?.file_name || 'OpenSubtitles VIP',
-            _source: 'opensub-official',
-            _priority: 1
-          });
-        }
-      } catch (e) {}
-    }
-    return out;
-  } catch (e) { logErr('opensubDirect', e); return []; }
-}
-
-async function fetchSubDLv2(params, apiKey) {
-  if (!apiKey) return [];
-  try {
-    const qs = new URLSearchParams({ ...params, languages: 'ar,en', unpack: '1' });
-    const r = await axios.get(`https://api.subdl.com/api/v2/subtitles/search?${qs.toString()}`, getAxiosConfig({ Authorization: `Bearer ${apiKey.trim()}` }));
-    const subs = r.data?.subtitles || r.data?.results || [];
-    return subs.filter(s => s && (s.url || s.download_url || s.file_url)).map(s => ({
-      url: s.url || s.download_url || s.file_url,
-      lang: (s.lang || s.language || 'ara').toLowerCase(),
-      origName: s.release_name || s.name || 'SubDL',
-      _source: 'subdl-v2',
-      _priority: 2
-    }));
-  } catch (e) { logErr('subdlV2', e); return []; }
-}
-
-async function fetchSubDLDirectZip(imdbId, season, episode, apiKey) {
-  if (!apiKey) return [];
-  try {
-    const params = new URLSearchParams({ api_key: apiKey.trim(), imdb_id: imdbId, languages: 'AR,EN' });
-    if (season) params.set('season_number', season);
-    if (episode) params.set('episode_number', episode);
-
-    const r = await axios.get(`https://api.subdl.com/api/v1/subtitles?${params.toString()}`, getAxiosConfig());
-    return (r.data?.subtitles || []).filter(item => item.url).map(item => ({
-      url: item.url.startsWith('http') ? item.url : `https://dl.subdl.com${item.url}`,
-      lang: (item.lang || 'ara').toLowerCase(),
-      origName: item.release_name || item.name || 'SubDL Archive',
-      _source: 'subdl-official',
-      _isZip: true,
-      _priority: 99 // أولوية متأخرة جداً لعدم تصدر القائمة
-    }));
-  } catch (e) { logErr('subdlZip', e); return []; }
-}
-
-async function fetchSubSourceDirect(title, apiKey) {
-  if (!apiKey || !title) return [];
-  try {
-    const search = await axios.get(`https://api.subsource.net/api/v1/movies/search?query=${encodeURIComponent(title)}`, getAxiosConfig({ 'X-API-Key': apiKey.trim() }));
-    const movieId = search.data?.data?.[0]?.movieId || search.data?.movies?.[0]?.id;
-    if (!movieId) return [];
-
-    const subsRes = await axios.get(`https://api.subsource.net/api/v1/subtitles?movieId=${movieId}&language=arabic&sort=newest&limit=20`, getAxiosConfig({ 'X-API-Key': apiKey.trim() }));
-    const subs = subsRes.data?.data || [];
-    const out = [];
-
-    for (const s of subs.slice(0, 10)) {
-      try {
-        const dl = await axios.get(`https://api.subsource.net/api/v1/subtitles/${s.subtitleId}/download`, getAxiosConfig({ 'X-API-Key': apiKey.trim() }));
-        const link = dl.data?.link || dl.data?.url || dl.data?.downloadUrl;
-        if (link) {
-          out.push({
-            url: link,
-            lang: 'ara',
-            origName: Array.isArray(s.releaseInfo) ? s.releaseInfo.join(' ') : (s.releaseInfo || 'SubSource'),
-            _source: 'subsource',
-            _priority: 2
-          });
-        }
-      } catch (e) {}
-    }
-    return out;
-  } catch (e) { logErr('subsource', e); return []; }
-}
-
-async function fetchJimakuDirect(anilistId, episode, apiKey) {
-  if (!apiKey || !anilistId) return [];
-  try {
-    const s = await axios.get(`https://jimaku.cc/api/entries/search?anilist_id=${anilistId}`, getAxiosConfig({ 'Authorization': apiKey.trim() }));
-    const entryId = s.data?.[0]?.id;
-    if (!entryId) return [];
-
-    const f = await axios.get(`https://jimaku.cc/api/entries/${entryId}/files`, getAxiosConfig({ 'Authorization': apiKey.trim() }));
-    const files = (Array.isArray(f.data) ? f.data : []).filter(file => /\.(ass|ssa|srt|vtt|zip)$/i.test(file.name || file.url || ''));
-
-    return files.map(file => ({
-      url: file.url,
-      lang: 'ara',
-      origName: file.name || 'Jimaku Anime',
-      _source: 'jimaku',
-      _priority: 1
-    }));
-  } catch (e) { logErr('jimaku', e); return []; }
-}
-
-function mirrorRequest(url, sourceKey) {
-  return axios.get(url, getAxiosConfig())
-    .then(r => (r.data?.subtitles || []).map(s => ({
-      url: s.url,
-      lang: s.lang || 'ara',
-      origName: s.title || s.SubFileName || s.name || sourceKey,
-      _source: sourceKey,
-      _priority: 2
-    })))
-    .catch(() => []);
-}
-
-// ============= مسار فحص المفاتيح =============
 app.post('/test-key', async (req, res) => {
   const { provider, key } = req.body;
   if (!key) return res.json({ success: false, message: "يرجى إدخال المفتاح أولاً ⚠️" });
   const cleanKey = key.trim();
+
   try {
     if (provider === 'gemini') {
       const r = await axios.get(`https://generativelanguage.googleapis.com/v1beta/models?key=${cleanKey}`, { timeout: 7000 });
@@ -458,7 +186,7 @@ app.post('/test-key', async (req, res) => {
       if (r.status === 200) return res.json({ success: true, message: "مفتاح OpenAI صالح 100% ✅" });
     }
     if (provider === 'opensub') {
-      const r = await axios.get('https://api.opensubtitles.com/api/v1/subtitles?query=Inception', getAxiosConfig({ 'Api-Key': cleanKey }));
+      const r = await axios.get('https://api.opensubtitles.com/api/v1/subtitles?query=Inception', { headers: { 'Api-Key': cleanKey, 'User-Agent': getRandomUA() }, timeout: 5000 });
       if (r.status === 200) return res.json({ success: true, message: "مفتاح OpenSubtitles صالح 100% ✅" });
     }
     if (provider === 'subdl') {
@@ -466,7 +194,7 @@ app.post('/test-key', async (req, res) => {
       if (r.data?.status === true || r.data?.results) return res.json({ success: true, message: "مفتاح SubDL صالح 100% ✅" });
     }
     if (provider === 'subsource') {
-      const r = await axios.get('https://api.subsource.net/api/v1/movies/search?query=Inception', getAxiosConfig({ 'X-API-Key': cleanKey })).catch(e => e.response);
+      const r = await axios.get('https://api.subsource.net/api/v1/movies/search?query=Inception', { headers: { 'X-API-Key': cleanKey, 'User-Agent': getRandomUA() }, timeout: 5000 }).catch(e => e.response);
       if (r && (r.status === 200 || r.status === 404)) return res.json({ success: true, message: "مفتاح SubSource صالح 100% ✅" });
     }
     if (provider === 'jimaku') return res.json({ success: true, message: "مفتاح Jimaku صالح ومحفوظ ✅" });
@@ -478,7 +206,6 @@ app.post('/test-key', async (req, res) => {
   }
 });
 
-// ============= واجهة التخصيص =============
 app.get(['/', '/configure'], (req, res) => {
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.send(`
@@ -613,61 +340,27 @@ app.get(['/', '/configure'], (req, res) => {
 
 app.get(['/manifest.json', '/:config/manifest.json'], (req, res) => res.json(manifest));
 
-// ============= المعالج الرئيسي لجلب كافة الروابط =============
 app.get(['/subtitles/:type/:id.json', '/subtitles/:type/:id/:extra.json', '/:config/subtitles/:type/:id.json', '/:config/subtitles/:type/:id/:extra.json'], async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   const { type, id, extra } = req.params;
   const targetId = extra && extra.endsWith('.json') ? `${id}/${extra.replace('.json', '')}` : id.replace('.json', '');
   const config = decodeConfig(req.params.config);
 
-  const tIds = [targetId];
   const { imdbId, season, episode } = parseImdbId(targetId);
 
-  const reqs = [];
+  const [openSubRes, subdlRes, subsourceRes, animeRes] = await Promise.allSettled([
+    getOpenSubtitles({ imdbId, season, episode, type, targetId, apiKey: config.openSubKey }),
+    getSubDL({ imdbId, season, episode, type, targetId, apiKey: config.subdlKey }),
+    getSubSource({ imdbId, apiKey: config.subsourceKey }),
+    getAnimeSubtitles({ targetId, type, apiKey: config.jimakuKey })
+  ]);
 
-  // مرايا Stremio العامة (شغالة 100% ومجانية)
-  reqs.push(
-    mirrorRequest(`https://opensubtitles-v3.strem.io/subtitles/${type}/${targetId}.json`, 'opensub-v3'),
-    mirrorRequest(`https://opensubtitles.strem.fun/subtitles/${type}/${targetId}.json`, 'opensub-fun'),
-    mirrorRequest(`https://subdl-stremio.vercel.app/subtitles/${type}/${targetId}.json`, 'subdl-mirror'),
-    mirrorRequest(`https://yifysubtitles.strem.fun/subtitles/${type}/${targetId}.json`, 'yify')
-  );
-
-  // مصادر الأنمي
-  if (targetId.startsWith('kitsu') || targetId.startsWith('anilist') || targetId.startsWith('mal') || type === 'anime' || type === 'series') {
-    reqs.push(
-      mirrorRequest(`https://anime-subtitles.strem.fun/subtitles/series/${targetId}.json`, 'anime-subs'),
-      mirrorRequest(`https://kitsunekko-subtitles.strem.fun/subtitles/series/${targetId}.json`, 'kitsunekko')
-    );
-  }
-
-  // OpenSubtitles VIP
-  if (config.openSubKey && imdbId.startsWith('tt')) {
-    reqs.push(fetchOpenSubtitlesDirect(imdbId, season, episode, config.openSubKey));
-  }
-
-  // SubDL v2 المباشر فقط (بدون أرشيف)
-  if (config.subdlKey && imdbId.startsWith('tt')) {
-    reqs.push(fetchSubDLv2({ imdb_id: imdbId, season, episode }, config.subdlKey));
-  }
-
-  // SubSource
-  if (config.subsourceKey) {
-    reqs.push(fetchSubSourceDirect(imdbId, config.subsourceKey));
-  }
-
-  // Jimaku للأنمي
-  if (config.jimakuKey && (targetId.startsWith('anilist') || targetId.startsWith('kitsu'))) {
-    reqs.push(fetchJimakuDirect(targetId.split(':')[1], episode, config.jimakuKey));
-  }
-
-  // SubDL أرشيف Zip يوضع في ذيل النتائج فقط لتفادي الروابط الفارغة
-  if (config.subdlKey && imdbId.startsWith('tt')) {
-    reqs.push(fetchSubDLDirectZip(imdbId, season, episode, config.subdlKey));
-  }
-
-  const results = await Promise.all(reqs);
-  let rawSubs = results.flat().filter(s => s && s.url && typeof s.url === 'string');
+  const rawSubs = [
+    ...(openSubRes.status === 'fulfilled' ? openSubRes.value : []),
+    ...(subdlRes.status === 'fulfilled' ? subdlRes.value : []),
+    ...(subsourceRes.status === 'fulfilled' ? subsourceRes.value : []),
+    ...(animeRes.status === 'fulfilled' ? animeRes.value : [])
+  ].filter(s => s && s.url && typeof s.url === 'string');
 
   const host = req.get('host');
   const protocol = req.protocol;
@@ -680,7 +373,6 @@ app.get(['/subtitles/:type/:id.json', '/subtitles/:type/:id/:extra.json', '/:con
     if (seenUrls.has(s.url)) continue;
     seenUrls.add(s.url);
 
-    // التحقق الحقيقي من الامتداد: لا نعتبره ASS إلا إذا كان امتداده الفعلي كذلك
     const extMatch = s.url.match(/\.(ass|ssa|srt|vtt)(\?|$)/i);
     const ext = extMatch ? extMatch[1].toLowerCase() : 'srt';
 
@@ -691,13 +383,10 @@ app.get(['/subtitles/:type/:id.json', '/subtitles/:type/:id/:extra.json', '/:con
 
     const sourceName = sourceLabelOf(s._source);
     const trackLabel = `${s.origName || 'ترجمة'} • ${sourceName} • ${ext.toUpperCase()}`;
-
-    // اسم معرّف نظيف ومقروء يظهر بشكل ممتاز على شاشة التلفاز
     const cleanIdForTv = `${sourceName} • ${ext.toUpperCase()} [${allFormattedSubs.length + 1}]`;
 
-    // حساب أولوية الفرز: الروابط المباشرة والموثوقة أولاً، وملفات ASS الحقيقية تأخذ تفضيلاً طبيعياً
     let priorityScore = s._priority || 10;
-    if (ext === 'ass' || ext === 'ssa') priorityScore -= 1; // تفضيل خفيف لملفات ASS دون إجبار
+    if (ext === 'ass' || ext === 'ssa') priorityScore -= 1;
 
     const formattedTrack = {
       id: cleanIdForTv,
@@ -705,8 +394,7 @@ app.get(['/subtitles/:type/:id.json', '/subtitles/:type/:id/:extra.json', '/:con
       lang: isAr ? 'ara' : (l || 'eng'),
       name: trackLabel,
       title: trackLabel,
-      _priorityScore: priorityScore,
-      _isAr: isAr
+      _priorityScore: priorityScore
     };
 
     if (isAr) {
@@ -716,10 +404,8 @@ app.get(['/subtitles/:type/:id.json', '/subtitles/:type/:id/:extra.json', '/:con
     }
   }
 
-  // ترتيب منطقي: المصادر الموثوقة أولاً، وتفضيل طبيعي للـ ASS
   allFormattedSubs.sort((a, b) => a._priorityScore - b._priorityScore);
 
-  // إضافة حتى 5 ترجمات AI موجهة بدقة إلى العربية في نهاية القائمة
   const hasAiKey = config.geminiKey || config.groqKey || config.deeplKey || config.openaiKey;
   if (nonArabicSubs.length > 0 && hasAiKey) {
     const aiCandidates = nonArabicSubs.slice(0, 5);
@@ -736,7 +422,7 @@ app.get(['/subtitles/:type/:id.json', '/subtitles/:type/:id/:extra.json', '/:con
   }
 
   const finalResults = allFormattedSubs.slice(0, config.limit);
-  return res.json({ subtitles: finalResults.map(({ _priorityScore, _isAr, ...cleanSub }) => cleanSub) });
+  return res.json({ subtitles: finalResults.map(({ _priorityScore, ...cleanSub }) => cleanSub) });
 });
 
 const PORT = process.env.PORT || 10000;
