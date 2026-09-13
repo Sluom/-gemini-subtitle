@@ -12,9 +12,9 @@ app.use(express.json());
 
 const manifest = {
   id: "org.nuvio.universal.gemini.subtitles",
-  version: "28.5.0",
+  version: "29.0.0",
   name: "Universal Subtitles & Gemini AI",
-  description: "جلب كافة الترجمات الشاملة المباشرة مع ترجمة فورية عربية دقيقة عبر Groq و Gemini",
+  description: "جلب كافة الترجمات الشاملة المباشرة مع تنظيم ذكي وتسميات نظيفة لشاشات التلفاز",
   logo: "https://raw.githubusercontent.com/Sluom/-gemini-subtitle/main/logo.png",
   resources: [{ name: "subtitles", types: ["anime", "series", "movie", "other"], idPrefixes: ["kitsu", "mal", "anilist", "tt"] }],
   types: ["anime", "series", "movie", "other"],
@@ -50,7 +50,7 @@ function logErr(label, err) {
 
 function slugify(str) {
   return (str || 'sub').toString().normalize('NFKD')
-    .replace(/[^\w\u0600-\u06FF\- ]/g, '').trim().replace(/\s+/g, '-').slice(0, 50) || 'sub';
+    .replace(/[^\w\u0600-\u06FF\- ]/g, '').trim().replace(/\s+/g, '-').slice(0, 45) || 'sub';
 }
 
 function safeDecodeText(buf) {
@@ -62,7 +62,6 @@ function safeDecodeText(buf) {
   }
 }
 
-// مستخرج قوي للـ JSON يتعامل مع الأخطاء النحوية وعلامات التنصيص
 function parseRobustJsonArray(raw, expectedLength) {
   if (!raw) return null;
   let clean = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
@@ -74,7 +73,6 @@ function parseRobustJsonArray(raw, expectedLength) {
       return arr.map(x => String(x || '').trim());
     }
   } catch (e) {
-    // في حال فشل JSON.parse بسبب علامات الاقتباس، نستخرج النصوص برمجياً عبر Regex
     const stringMatches = [...clean.matchAll(/"([^"\\]*(?:\\.[^"\\]*)*)"/g)].map(m => m[1]);
     if (stringMatches.length >= expectedLength * 0.5) {
       return stringMatches.filter(s => s !== 'translations' && s !== 'data');
@@ -101,10 +99,8 @@ const SOURCE_LABELS = {
 };
 function sourceLabelOf(key) { return SOURCE_LABELS[key] || 'Source'; }
 
-// كاش في الذاكرة لحفظ الترجمة فور اكتمالها
 const translationCache = new Map();
 
-// نظام تشغيل الحزم المحدود لتفادي حظر 429
 async function runConcurrentPool(tasks, limit = 2) {
   const results = new Array(tasks.length);
   let index = 0;
@@ -217,19 +213,17 @@ function extractCuesUniversal(text) {
   return cues;
 }
 
-// ============= محرك الترجمة الفورية الصارم للعربية =============
+// ============= محرك الترجمة الفورية للعربية =============
 async function translateChunkStrict(texts, keys) {
   const prompt = `You are an automated subtitle translator. Target Language: ARABIC ONLY.
 Task: Translate the JSON array of strings into Arabic.
 Rules:
 1. Return a JSON object with key "translations" containing the Arabic strings array.
-2. DO NOT use double quotes inside strings. Use single quotes or Arabic quotes.
+2. DO NOT use double quotes inside strings.
 3. NEVER output English words.
-4. Output MUST be valid JSON format.
 Length: ${texts.length}.
 Input: ${JSON.stringify(texts)}`;
 
-  // 1. Groq عبر موديل 8b فائق السرعة بسقف 30,000 رمز
   if (keys.groqKey) {
     try {
       const r = await axios.post('https://api.groq.com/openai/v1/chat/completions', {
@@ -243,7 +237,6 @@ Input: ${JSON.stringify(texts)}`;
     } catch (e) { logErr('trans:groq', e); }
   }
 
-  // 2. Gemini الاحتياطي عبر موديل gemini-2.0-flash
   if (keys.geminiKey) {
     try {
       const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${encodeURIComponent(keys.geminiKey.trim())}`;
@@ -260,7 +253,6 @@ Input: ${JSON.stringify(texts)}`;
   return null;
 }
 
-// مسار الترجمة الفورية الشامل
 app.get(['/translate', '/translate/:filename'], async (req, res) => {
   const { subUrl, geminiKey, groqKey, openaiKey, deeplKey } = req.query;
   if (!subUrl) return res.status(400).send("No Subtitle URL");
@@ -284,7 +276,6 @@ app.get(['/translate', '/translate/:filename'], async (req, res) => {
       return res.send(ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[النظام] تعذر استخراج نصوص الترجمة المصدر.`);
     }
 
-    // حزم محكمة من 40 سطراً لضمان دقة الاستجابة
     const CHUNK = 40;
     const chunks = [];
     for (let i = 0; i < cues.length; i += CHUNK) {
@@ -294,7 +285,6 @@ app.get(['/translate', '/translate/:filename'], async (req, res) => {
     const tasks = chunks.map(chunk => async () => {
       const texts = chunk.map(c => c.text);
       const translated = await translateChunkStrict(texts, keys);
-      // في حال تعذر ترجمة سطر لا نرجع الإنجليزية أبداً
       return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : "ـ");
     });
 
@@ -335,8 +325,9 @@ async function fetchOpenSubtitlesDirect(imdbId, season, episode, apiKey) {
           out.push({
             url: dl.data.link,
             lang: item.attributes.language || 'ara',
-            origName: item.attributes.release || item.attributes.files?.[0]?.file_name || 'OpenSubtitles',
-            _source: 'opensub-official'
+            origName: item.attributes.release || item.attributes.files?.[0]?.file_name || 'OpenSubtitles VIP',
+            _source: 'opensub-official',
+            _priority: 1
           });
         }
       } catch (e) {}
@@ -355,7 +346,8 @@ async function fetchSubDLv2(params, apiKey) {
       url: s.url || s.download_url || s.file_url,
       lang: (s.lang || s.language || 'ara').toLowerCase(),
       origName: s.release_name || s.name || 'SubDL',
-      _source: 'subdl-v2'
+      _source: 'subdl-v2',
+      _priority: 2
     }));
   } catch (e) { logErr('subdlV2', e); return []; }
 }
@@ -371,9 +363,10 @@ async function fetchSubDLDirectZip(imdbId, season, episode, apiKey) {
     return (r.data?.subtitles || []).filter(item => item.url).map(item => ({
       url: item.url.startsWith('http') ? item.url : `https://dl.subdl.com${item.url}`,
       lang: (item.lang || 'ara').toLowerCase(),
-      origName: item.release_name || item.name || 'SubDL Zip',
+      origName: item.release_name || item.name || 'SubDL Archive',
       _source: 'subdl-official',
-      _isZip: true
+      _isZip: true,
+      _priority: 99 // أولوية متأخرة جداً لعدم تصدر القائمة
     }));
   } catch (e) { logErr('subdlZip', e); return []; }
 }
@@ -385,11 +378,11 @@ async function fetchSubSourceDirect(title, apiKey) {
     const movieId = search.data?.data?.[0]?.movieId || search.data?.movies?.[0]?.id;
     if (!movieId) return [];
 
-    const subsRes = await axios.get(`https://api.subsource.net/api/v1/subtitles?movieId=${movieId}&language=arabic&sort=newest&limit=30`, getAxiosConfig({ 'X-API-Key': apiKey.trim() }));
+    const subsRes = await axios.get(`https://api.subsource.net/api/v1/subtitles?movieId=${movieId}&language=arabic&sort=newest&limit=20`, getAxiosConfig({ 'X-API-Key': apiKey.trim() }));
     const subs = subsRes.data?.data || [];
     const out = [];
 
-    for (const s of subs.slice(0, 15)) {
+    for (const s of subs.slice(0, 10)) {
       try {
         const dl = await axios.get(`https://api.subsource.net/api/v1/subtitles/${s.subtitleId}/download`, getAxiosConfig({ 'X-API-Key': apiKey.trim() }));
         const link = dl.data?.link || dl.data?.url || dl.data?.downloadUrl;
@@ -398,7 +391,8 @@ async function fetchSubSourceDirect(title, apiKey) {
             url: link,
             lang: 'ara',
             origName: Array.isArray(s.releaseInfo) ? s.releaseInfo.join(' ') : (s.releaseInfo || 'SubSource'),
-            _source: 'subsource'
+            _source: 'subsource',
+            _priority: 2
           });
         }
       } catch (e) {}
@@ -420,9 +414,9 @@ async function fetchJimakuDirect(anilistId, episode, apiKey) {
     return files.map(file => ({
       url: file.url,
       lang: 'ara',
-      origName: file.name || 'Jimaku Anime Sub',
+      origName: file.name || 'Jimaku Anime',
       _source: 'jimaku',
-      _isZip: /\.zip$/i.test(file.name || file.url)
+      _priority: 1
     }));
   } catch (e) { logErr('jimaku', e); return []; }
 }
@@ -433,7 +427,8 @@ function mirrorRequest(url, sourceKey) {
       url: s.url,
       lang: s.lang || 'ara',
       origName: s.title || s.SubFileName || s.name || sourceKey,
-      _source: sourceKey
+      _source: sourceKey,
+      _priority: 2
     })))
     .catch(() => []);
 }
@@ -630,7 +625,7 @@ app.get(['/subtitles/:type/:id.json', '/subtitles/:type/:id/:extra.json', '/:con
 
   const reqs = [];
 
-  // مرايا Stremio العامة
+  // مرايا Stremio العامة (شغالة 100% ومجانية)
   reqs.push(
     mirrorRequest(`https://opensubtitles-v3.strem.io/subtitles/${type}/${targetId}.json`, 'opensub-v3'),
     mirrorRequest(`https://opensubtitles.strem.fun/subtitles/${type}/${targetId}.json`, 'opensub-fun'),
@@ -646,27 +641,29 @@ app.get(['/subtitles/:type/:id.json', '/subtitles/:type/:id/:extra.json', '/:con
     );
   }
 
-  // OpenSubtitles API
+  // OpenSubtitles VIP
   if (config.openSubKey && imdbId.startsWith('tt')) {
     reqs.push(fetchOpenSubtitlesDirect(imdbId, season, episode, config.openSubKey));
   }
 
-  // SubDL (v1 Zips & v2 Unpacked)
+  // SubDL v2 المباشر فقط (بدون أرشيف)
   if (config.subdlKey && imdbId.startsWith('tt')) {
-    reqs.push(
-      fetchSubDLDirectZip(imdbId, season, episode, config.subdlKey),
-      fetchSubDLv2({ imdb_id: imdbId, season, episode }, config.subdlKey)
-    );
+    reqs.push(fetchSubDLv2({ imdb_id: imdbId, season, episode }, config.subdlKey));
   }
 
-  // SubSource API
+  // SubSource
   if (config.subsourceKey) {
     reqs.push(fetchSubSourceDirect(imdbId, config.subsourceKey));
   }
 
-  // Jimaku
+  // Jimaku للأنمي
   if (config.jimakuKey && (targetId.startsWith('anilist') || targetId.startsWith('kitsu'))) {
     reqs.push(fetchJimakuDirect(targetId.split(':')[1], episode, config.jimakuKey));
+  }
+
+  // SubDL أرشيف Zip يوضع في ذيل النتائج فقط لتفادي الروابط الفارغة
+  if (config.subdlKey && imdbId.startsWith('tt')) {
+    reqs.push(fetchSubDLDirectZip(imdbId, season, episode, config.subdlKey));
   }
 
   const results = await Promise.all(reqs);
@@ -683,22 +680,33 @@ app.get(['/subtitles/:type/:id.json', '/subtitles/:type/:id/:extra.json', '/:con
     if (seenUrls.has(s.url)) continue;
     seenUrls.add(s.url);
 
+    // التحقق الحقيقي من الامتداد: لا نعتبره ASS إلا إذا كان امتداده الفعلي كذلك
     const extMatch = s.url.match(/\.(ass|ssa|srt|vtt)(\?|$)/i);
-    const ext = extMatch ? extMatch[1].toLowerCase() : (s._isZip ? 'ass' : 'srt');
+    const ext = extMatch ? extMatch[1].toLowerCase() : 'srt';
 
     const cleanStreamUrl = `${protocol}://${host}/stream-sub/${slugify(s.origName)}.${ext}?url=${encodeURIComponent(s.url)}`;
 
     const l = (s.lang || '').toLowerCase();
     const isAr = l === 'ara' || l === 'ar' || l === 'arabic' || l.includes('ara');
 
-    const trackLabel = `${s.origName || 'ترجمة'} • ${sourceLabelOf(s._source)} • ${ext.toUpperCase()}`;
+    const sourceName = sourceLabelOf(s._source);
+    const trackLabel = `${s.origName || 'ترجمة'} • ${sourceName} • ${ext.toUpperCase()}`;
+
+    // اسم معرّف نظيف ومقروء يظهر بشكل ممتاز على شاشة التلفاز
+    const cleanIdForTv = `${sourceName} • ${ext.toUpperCase()} [${allFormattedSubs.length + 1}]`;
+
+    // حساب أولوية الفرز: الروابط المباشرة والموثوقة أولاً، وملفات ASS الحقيقية تأخذ تفضيلاً طبيعياً
+    let priorityScore = s._priority || 10;
+    if (ext === 'ass' || ext === 'ssa') priorityScore -= 1; // تفضيل خفيف لملفات ASS دون إجبار
 
     const formattedTrack = {
-      id: `universal_${s._source || 'sub'}_${ext}_${allFormattedSubs.length + 1}`,
+      id: cleanIdForTv,
       url: cleanStreamUrl,
       lang: isAr ? 'ara' : (l || 'eng'),
       name: trackLabel,
-      title: trackLabel
+      title: trackLabel,
+      _priorityScore: priorityScore,
+      _isAr: isAr
     };
 
     if (isAr) {
@@ -708,20 +716,17 @@ app.get(['/subtitles/:type/:id.json', '/subtitles/:type/:id/:extra.json', '/:con
     }
   }
 
-  allFormattedSubs.sort((a, b) => {
-    const isAAss = a.name.includes('ASS');
-    const isBAss = b.name.includes('ASS');
-    return isBAss - isAAss;
-  });
+  // ترتيب منطقي: المصادر الموثوقة أولاً، وتفضيل طبيعي للـ ASS
+  allFormattedSubs.sort((a, b) => a._priorityScore - b._priorityScore);
 
-  // إضافة حتى 5 ترجمات AI موجهة بدقة إلى العربية
+  // إضافة حتى 5 ترجمات AI موجهة بدقة إلى العربية في نهاية القائمة
   const hasAiKey = config.geminiKey || config.groqKey || config.deeplKey || config.openaiKey;
   if (nonArabicSubs.length > 0 && hasAiKey) {
     const aiCandidates = nonArabicSubs.slice(0, 5);
     aiCandidates.forEach((c, idx) => {
       const aiUrl = `${protocol}://${host}/translate/${slugify(c.name)}-ai.ass?subUrl=${encodeURIComponent(c.rawUrl)}&geminiKey=${encodeURIComponent(config.geminiKey)}&groqKey=${encodeURIComponent(config.groqKey)}&openaiKey=${encodeURIComponent(config.openaiKey)}`;
       allFormattedSubs.push({
-        id: `universal_ai_trans_${idx + 1}`,
+        id: `الذكاء الاصطناعي 🇸🇦 • ASS [${idx + 1}]`,
         url: aiUrl,
         lang: 'ara',
         name: `[AI الفورية 🇸🇦] ${c.name}`,
@@ -731,7 +736,7 @@ app.get(['/subtitles/:type/:id.json', '/subtitles/:type/:id/:extra.json', '/:con
   }
 
   const finalResults = allFormattedSubs.slice(0, config.limit);
-  return res.json({ subtitles: finalResults });
+  return res.json({ subtitles: finalResults.map(({ _priorityScore, _isAr, ...cleanSub }) => cleanSub) });
 });
 
 const PORT = process.env.PORT || 10000;
