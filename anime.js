@@ -87,8 +87,12 @@ async function fetchAnimeTosho(title, episode) {
       for (const att of attachments) {
         const name = (att.filename || '').toLowerCase();
         if ((name.endsWith('.ass') || name.endsWith('.srt')) && (name.includes('ara') || name.includes('arabic') || name.includes('ar.'))) {
+          let directUrl = att.link || '';
+          if (directUrl && !directUrl.startsWith('http')) {
+            directUrl = `https://animetosho.org${directUrl.startsWith('/') ? '' : '/'}${directUrl}`;
+          }
           results.push({
-            url: att.link,
+            url: directUrl,
             lang: 'ara',
             origName: att.filename || item.title || 'AnimeTosho [ASS]',
             _source: 'animetosho',
