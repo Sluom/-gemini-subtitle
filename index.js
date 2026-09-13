@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 const AdmZip = require('adm-zip');
+const iconv = require('iconv-lite');
 
 const { resolveMedia } = require('./idMapper');
 const { getOpenSubtitles } = require('./opensubtitles');
@@ -24,6 +25,22 @@ const MANIFEST = {
   idPrefixes: ['tt', 'kitsu'],
   catalogs: []
 };
+
+function ensureUtf8(buffer) {
+  if (!buffer || !Buffer.isBuffer(buffer)) return buffer;
+  if (buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4b) return buffer;
+
+  const text = buffer.toString('utf-8');
+  if (text.includes('')) {
+    try {
+      const decoded = iconv.decode(buffer, 'windows-1256');
+      return Buffer.from(decoded, 'utf-8');
+    } catch (e) {
+      return buffer;
+    }
+  }
+  return buffer;
+}
 
 function parseConfig(req) {
   let config = {
@@ -166,8 +183,7 @@ app.get(['/subtitles/:type/:id', '/:config/subtitles/:type/:id'], async (req, re
         id: `${s._source || 'sub'}_${idx}`,
         url: finalUrl,
         lang: s.lang || 'ara',
-        _priority: s._priority || 2,
-        _origName: s.origName || ''
+        _priority: s._priority || 2
       };
     });
 
@@ -219,7 +235,8 @@ app.get('/stream-zip', async (req, res) => {
       return res.status(404).send('Episode not found in archive');
     }
 
-    const content = entry.getData();
+    const rawContent = entry.getData();
+    const content = ensureUtf8(rawContent);
     const isAss = entry.entryName.toLowerCase().endsWith('.ass');
 
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -236,11 +253,24 @@ app.get('/stream-subsource', async (req, res) => {
 
   try {
     const buffer = await fetchSubSourceBuffer(dataUrl);
-    const isAss = dataUrl.includes('.ass');
+    let finalBuffer = buffer;
+    let isAss = dataUrl.includes('.ass');
+
+    if (buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4b) {
+      const zip = new AdmZip(buffer);
+      const entries = zip.getEntries();
+      const subEntry = entries.find(e => !e.isDirectory && (e.entryName.endsWith('.srt') || e.entryName.endsWith('.ass')));
+      if (subEntry) {
+        finalBuffer = subEntry.getData();
+        isAss = subEntry.entryName.toLowerCase().endsWith('.ass');
+      }
+    }
+
+    finalBuffer = ensureUtf8(finalBuffer);
 
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Content-Type', isAss ? 'text/x-ssa; charset=utf-8' : 'text/plain; charset=utf-8');
-    res.send(buffer);
+    res.send(finalBuffer);
   } catch (e) {
     res.status(500).send('Error streaming SubSource');
   }
