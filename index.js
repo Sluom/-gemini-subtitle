@@ -166,7 +166,7 @@ app.post('/api/test-key', async (req, res) => {
       });
       if (r.status === 200) return res.json({ success: true, message: 'مفتاح Jimaku صالح 100% ✅' });
     } else if (provider === 'subsource') {
-      const r = await axios.get('https://api.subsource.net/api/v1/movies/search?query=avatar&searchType=text', {
+      const r = await axios.get('https://api.subsource.net/api/v1/movies/search?q=avatar&searchType=text', {
         headers: { 'X-API-Key': cleanKey },
         timeout: 7000
       });
