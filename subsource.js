@@ -14,9 +14,9 @@ async function getSubSource({ title, imdbId, season, episode, apiKey }) {
   try {
     let searchUrl = '';
     if (imdbId && imdbId.startsWith('tt')) {
-      searchUrl = `https://api.subsource.net/api/v1/movies/search?query=${imdbId}&searchType=imdb`;
+      searchUrl = `https://api.subsource.net/api/v1/movies/search?q=${imdbId}&searchType=imdb`;
     } else if (title) {
-      searchUrl = `https://api.subsource.net/api/v1/movies/search?query=${encodeURIComponent(title)}&searchType=text`;
+      searchUrl = `https://api.subsource.net/api/v1/movies/search?q=${encodeURIComponent(title)}&searchType=text`;
     } else {
       return [];
     }
