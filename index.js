@@ -27,19 +27,29 @@ const MANIFEST = {
   catalogs: []
 };
 
-function ensureUtf8(buffer) {
+function fixArabicEncoding(buffer) {
   if (!buffer || !Buffer.isBuffer(buffer)) return buffer;
   if (buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4b) return buffer;
 
-  const text = buffer.toString('utf-8');
-  if (text.includes('')) {
-    try {
-      const decoded = iconv.decode(buffer, 'windows-1256');
-      return Buffer.from(decoded, 'utf-8');
-    } catch (e) {
-      return buffer;
-    }
+  const utf8Text = buffer.toString('utf-8');
+  if (/[\u0600-\u06FF]/.test(utf8Text)) {
+    return buffer;
   }
+
+  try {
+    const decodedWin = iconv.decode(buffer, 'windows-1256');
+    if (/[\u0600-\u06FF]/.test(decodedWin)) {
+      return Buffer.from(decodedWin, 'utf-8');
+    }
+  } catch (e) {}
+
+  try {
+    const decodedIso = iconv.decode(buffer, 'iso-8859-6');
+    if (/[\u0600-\u06FF]/.test(decodedIso)) {
+      return Buffer.from(decodedIso, 'utf-8');
+    }
+  } catch (e) {}
+
   return buffer;
 }
 
@@ -533,7 +543,7 @@ app.get(['/subtitles/:type/:id', '/:config/subtitles/:type/:id'], async (req, re
       .flatMap(r => r.value)
       .filter(s => s && s.url);
 
-    console.log(`[SUBS] Total subtitles found before filtering: ${allSubs.length}`);
+    console.log(`[SUBS] Total subtitles found: ${allSubs.length}`);
 
     const formatted = allSubs.map((s, idx) => {
       let finalUrl = s.url;
@@ -542,6 +552,8 @@ app.get(['/subtitles/:type/:id', '/:config/subtitles/:type/:id'], async (req, re
         finalUrl = `${baseUrl}/stream-zip?url=${encodeURIComponent(s.url)}&ep=${s._episode || episode || 1}`;
       } else if (s.url.startsWith('subsource://')) {
         finalUrl = `${baseUrl}/stream-subsource?data=${encodeURIComponent(s.url)}`;
+      } else {
+        finalUrl = `${baseUrl}/stream-sub?url=${encodeURIComponent(s.url)}`;
       }
 
       return {
@@ -572,11 +584,34 @@ app.get(['/subtitles/:type/:id', '/:config/subtitles/:type/:id'], async (req, re
       lang: s.lang
     }));
 
-    console.log(`[SUBS] Final unique subtitles returned to Nuvio: ${uniqueSubs.length}`);
     res.json({ subtitles: uniqueSubs });
   } catch (err) {
     console.error(`[SUBS] Error processing request for ${targetId}:`, err.message);
     res.json({ subtitles: [] });
+  }
+});
+
+app.get('/stream-sub', async (req, res) => {
+  const subUrl = req.query.url;
+  if (!subUrl) return res.status(400).send('Missing URL');
+
+  try {
+    const response = await axios.get(subUrl, {
+      responseType: 'arraybuffer',
+      timeout: 10000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      }
+    });
+
+    const content = fixArabicEncoding(Buffer.from(response.data));
+    const isAss = subUrl.toLowerCase().includes('.ass');
+
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Content-Type', isAss ? 'text/x-ssa; charset=utf-8' : 'text/plain; charset=utf-8');
+    res.send(content);
+  } catch (e) {
+    res.redirect(subUrl);
   }
 });
 
@@ -603,7 +638,7 @@ app.get('/stream-zip', async (req, res) => {
     }
 
     const rawContent = entry.getData();
-    const content = ensureUtf8(rawContent);
+    const content = fixArabicEncoding(rawContent);
     const isAss = entry.entryName.toLowerCase().endsWith('.ass');
 
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -633,7 +668,7 @@ app.get('/stream-subsource', async (req, res) => {
       }
     }
 
-    finalBuffer = ensureUtf8(finalBuffer);
+    finalBuffer = fixArabicEncoding(finalBuffer);
 
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Content-Type', isAss ? 'text/x-ssa; charset=utf-8' : 'text/plain; charset=utf-8');
