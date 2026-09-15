@@ -18,7 +18,7 @@ const PORT = process.env.PORT || 7000;
 
 const MANIFEST = {
   id: 'org.nuvio.aggregated.subtitles',
-  version: '24.0.0',
+  version: '24.1.0',
   name: 'Nuvio Multi-Source Subtitles',
   description: 'Arabic & Multi-language subtitles from OpenSubtitles, SubDL, SubSource & Anime',
   resources: ['subtitles'],
@@ -549,11 +549,11 @@ app.get(['/subtitles/:type/:id', '/:config/subtitles/:type/:id'], async (req, re
       let finalUrl = s.url;
 
       if (s._isZip) {
-        finalUrl = `${baseUrl}/stream-zip?url=${encodeURIComponent(s.url)}&ep=${s._episode || episode || 1}`;
+        finalUrl = `${baseUrl}/stream-zip.srt?url=${encodeURIComponent(s.url)}&ep=${s._episode || episode || 1}`;
       } else if (s.url.startsWith('subsource://')) {
-        finalUrl = `${baseUrl}/stream-subsource?data=${encodeURIComponent(s.url)}`;
+        finalUrl = `${baseUrl}/stream-subsource.srt?data=${encodeURIComponent(s.url)}`;
       } else {
-        finalUrl = `${baseUrl}/stream-sub?url=${encodeURIComponent(s.url)}`;
+        finalUrl = `${baseUrl}/stream-sub.srt?url=${encodeURIComponent(s.url)}`;
       }
 
       return {
@@ -591,7 +591,7 @@ app.get(['/subtitles/:type/:id', '/:config/subtitles/:type/:id'], async (req, re
   }
 });
 
-app.get('/stream-sub', async (req, res) => {
+app.get(['/stream-sub', '/stream-sub.srt'], async (req, res) => {
   const subUrl = req.query.url;
   if (!subUrl) return res.status(400).send('Missing URL');
 
@@ -608,14 +608,14 @@ app.get('/stream-sub', async (req, res) => {
     const isAss = subUrl.toLowerCase().includes('.ass');
 
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Content-Type', isAss ? 'text/x-ssa; charset=utf-8' : 'text/plain; charset=utf-8');
+    res.setHeader('Content-Type', isAss ? 'text/x-ssa; charset=utf-8' : 'application/x-subrip; charset=utf-8');
     res.send(content);
   } catch (e) {
     res.redirect(subUrl);
   }
 });
 
-app.get('/stream-zip', async (req, res) => {
+app.get(['/stream-zip', '/stream-zip.srt'], async (req, res) => {
   const zipUrl = req.query.url;
   const ep = req.query.ep || '1';
 
@@ -642,14 +642,14 @@ app.get('/stream-zip', async (req, res) => {
     const isAss = entry.entryName.toLowerCase().endsWith('.ass');
 
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Content-Type', isAss ? 'text/x-ssa; charset=utf-8' : 'text/plain; charset=utf-8');
+    res.setHeader('Content-Type', isAss ? 'text/x-ssa; charset=utf-8' : 'application/x-subrip; charset=utf-8');
     res.send(content);
   } catch (e) {
     res.status(500).send('Error extracting ZIP');
   }
 });
 
-app.get('/stream-subsource', async (req, res) => {
+app.get(['/stream-subsource', '/stream-subsource.srt'], async (req, res) => {
   const dataUrl = req.query.data;
   if (!dataUrl) return res.status(400).send('Missing data');
 
@@ -671,7 +671,7 @@ app.get('/stream-subsource', async (req, res) => {
     finalBuffer = fixArabicEncoding(finalBuffer);
 
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Content-Type', isAss ? 'text/x-ssa; charset=utf-8' : 'text/plain; charset=utf-8');
+    res.setHeader('Content-Type', isAss ? 'text/x-ssa; charset=utf-8' : 'application/x-subrip; charset=utf-8');
     res.send(finalBuffer);
   } catch (e) {
     res.status(500).send('Error streaming SubSource');
