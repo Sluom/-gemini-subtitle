@@ -11,7 +11,7 @@ function getHeaders(apiKey) {
 
 async function getSubSource({ title, imdbId, season, episode, type, apiKey }, debugMode = false) {
   const activeKey = apiKey || process.env.SUBSOURCE_API_KEY || '';
-  const logs = { apiKeyReceived: !!activeKey, imdbId, title };
+  const logs = { apiKeyReceived: !!activeKey, imdbId, title, season, episode };
   if (!activeKey) {
     if (debugMode) return { error: 'SubSource API Key is MISSING', logs };
     return [];
@@ -61,7 +61,7 @@ async function getSubSource({ title, imdbId, season, episode, type, apiKey }, de
     let list = getRes.data?.data || getRes.data?.subtitles || [];
     if (!list.length) return [];
 
-    // فلترة اللغات (عربي وإنكليزي)
+    // تصفية اللغات (عربي وإنكليزي)
     const validSubs = list.filter(item => {
       const l = (item.Language || item.language || item.lang || '').toLowerCase();
       return l.includes('arab') || l === 'ar' || l.includes('eng') || l === 'en';
@@ -69,23 +69,41 @@ async function getSubSource({ title, imdbId, season, episode, type, apiKey }, de
 
     list = validSubs.length > 0 ? validSubs : list;
 
-    // تصفية أرقام الحلقات للمسلسلات
+    // تصفية إجبارية وصارمة لرقم الموسم والحلقة معاً
     if (season && episode) {
       const sNum = parseInt(season, 10);
       const eNum = parseInt(episode, 10);
-      const epRegex = new RegExp(`(?:s0*${sNum})?(?:e|ep|episode)0*${eNum}(?:[^0-9]|$)`, 'i');
 
-      const filtered = list.filter(item => {
-        if (item.season && item.episode) {
-          return parseInt(item.season, 10) === sNum && parseInt(item.episode, 10) === eNum;
+      const sPattern = `0*${sNum}`;
+      const ePattern = `0*${eNum}`;
+
+      // صيغ مطابقة إجبارية (يشترط وجود رقم هذا الموسم حصراً ورقم هذه الحلقة)
+      const strictPatterns = [
+        new RegExp(`(?:s|season[._ -]*)${sPattern}[._ -]*(?:e|ep|episode)[._ -]*${ePattern}(?:[^0-9]|$)`, 'i'),
+        new RegExp(`\\b${sPattern}x${ePattern}\\b`, 'i'),
+        new RegExp(`\\[${sPattern}[._ -]*[xe][._ -]*${ePattern}\\]`, 'i')
+      ];
+
+      list = list.filter(item => {
+        // إذا كان الموقع يرجع season و episode كأرقام صريحة في الكائن
+        const itemS = item.season != null && item.season !== '' ? parseInt(item.season, 10) : null;
+        const itemE = item.episode != null && item.episode !== '' ? parseInt(item.episode, 10) : null;
+
+        if (itemS !== null && itemE !== null && !isNaN(itemS) && !isNaN(itemE)) {
+          return itemS === sNum && itemE === eNum;
         }
-        const relName = (Array.isArray(item.releaseInfo) ? item.releaseInfo[0] : '') || item.release_name || item.name || '';
-        return epRegex.test(relName);
-      });
 
-      if (filtered.length > 0) {
-        list = filtered;
-      }
+        // فحص أسماء ملفات النسخ المرفقة بالترجمة
+        const namesToCheck = [
+          ...(Array.isArray(item.releaseInfo) ? item.releaseInfo : [item.releaseInfo]),
+          item.release_name,
+          item.releaseName,
+          item.name,
+          item.fileName
+        ].filter(Boolean);
+
+        return namesToCheck.some(name => strictPatterns.some(rx => rx.test(name)));
+      });
     }
 
     const results = list.map(item => {
