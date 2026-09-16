@@ -10,7 +10,7 @@ function getHeaders(apiKey) {
 }
 
 async function getSubSource({ title, imdbId, season, episode, type, apiKey }, debugMode = false) {
-  const logs = { apiKeyReceived: !!apiKey, imdbId, title };
+  const logs = { apiKeyReceived: !!apiKey, imdbId, title, attempts: [] };
   if (!apiKey) {
     if (debugMode) return { error: 'SubSource API Key is MISSING', logs };
     return [];
@@ -20,7 +20,7 @@ async function getSubSource({ title, imdbId, season, episode, type, apiKey }, de
     let movie = null;
     let cleanTitle = (title || '').replace(/\([^)]*\)/g, '').trim();
 
-    // 1. البحث باسم الفلم
+    // 1. البحث باسم العمل
     if (cleanTitle && !cleanTitle.startsWith('tt')) {
       try {
         const textUrl = `https://api.subsource.net/api/v1/movies/search?q=${encodeURIComponent(cleanTitle)}&searchType=text`;
@@ -49,40 +49,64 @@ async function getSubSource({ title, imdbId, season, episode, type, apiKey }, de
       return [];
     }
 
-    // استخراج linkName الرسمي الخاص بـ SubSource
-    const linkName = movie.linkName || movie.slug || movie.id;
+    // استخراج معرف الفلم الحقيقي بناءً على تقرير الفحص
+    const movieId = movie.movieId || movie.id;
     logs.foundMovie = movie.title;
-    logs.linkName = linkName;
+    logs.movieId = movieId;
 
-    if (!linkName) {
-      if (debugMode) return { error: 'Missing linkName in movie object', rawMovie: movie, logs };
+    if (!movieId) {
+      if (debugMode) return { error: 'Missing movieId in movie object', rawMovie: movie, logs };
       return [];
     }
 
-    // 3. طلب الترجمات الرسمي عبر POST بمصفوفة اللغات الرسمية
+    // 3. جلب قائمة الترجمات باستخدام movieId
     let list = [];
+
+    // محاولة POST الرسمية بـ movieId
     try {
       const postRes = await axios.post(
         'https://api.subsource.net/api/v1/subtitles/search',
         {
-          movie: linkName,
+          movieId: movieId,
           lang: ['Arabic', 'English']
         },
         { headers: getHeaders(apiKey), timeout: 8000 }
       );
-      list = postRes.data?.data || postRes.data?.subtitles || [];
-      logs.postStatus = postRes.status;
+      const items = postRes.data?.data || postRes.data?.subtitles || [];
+      logs.attempts.push({ type: 'POST /search (movieId)', status: postRes.status, count: items.length });
+      if (items.length > 0) list = items;
     } catch (e) {
-      logs.postError = e.response?.status || e.message;
-      
-      // مسار احتياطي عبر GET في حال تغيرت استجابة الـ API
+      logs.attempts.push({ type: 'POST /search (movieId)', error: e.response?.status || e.message });
+    }
+
+    // محاولة GET الاحتياطية بـ movieId
+    if (!list.length) {
       try {
         const getRes = await axios.get(
-          `https://api.subsource.net/api/v1/subtitles?movie=${encodeURIComponent(linkName)}&lang=arabic,english`,
+          `https://api.subsource.net/api/v1/subtitles?movieId=${movieId}&lang=arabic,english`,
           { headers: getHeaders(apiKey), timeout: 7000 }
         );
-        list = getRes.data?.data || getRes.data?.subtitles || [];
-      } catch (e2) {}
+        const items = getRes.data?.data || getRes.data?.subtitles || [];
+        logs.attempts.push({ type: 'GET /subtitles?movieId', status: getRes.status, count: items.length });
+        if (items.length > 0) list = items;
+      } catch (e) {
+        logs.attempts.push({ type: 'GET /subtitles?movieId', error: e.response?.status || e.message });
+      }
+    }
+
+    // محاولة مسار movie/:id
+    if (!list.length) {
+      try {
+        const res2 = await axios.get(
+          `https://api.subsource.net/api/v1/subtitles/movie/${movieId}?lang=arabic,english`,
+          { headers: getHeaders(apiKey), timeout: 7000 }
+        );
+        const items = res2.data?.data || res2.data?.subtitles || [];
+        logs.attempts.push({ type: 'GET /subtitles/movie/:id', status: res2.status, count: items.length });
+        if (items.length > 0) list = items;
+      } catch (e) {
+        logs.attempts.push({ type: 'GET /subtitles/movie/:id', error: e.response?.status || e.message });
+      }
     }
 
     logs.totalSubsFound = list.length;
@@ -90,7 +114,7 @@ async function getSubSource({ title, imdbId, season, episode, type, apiKey }, de
 
     if (!list.length) return [];
 
-    // تصفية أرقام الحلقات في حالة المسلسلات
+    // تصفية أرقام الحلقات للمسلسلات
     if (season && episode) {
       const sNum = parseInt(season, 10);
       const eNum = parseInt(episode, 10);
@@ -100,7 +124,7 @@ async function getSubSource({ title, imdbId, season, episode, type, apiKey }, de
         if (item.season && item.episode) {
           return parseInt(item.season, 10) === sNum && parseInt(item.episode, 10) === eNum;
         }
-        const name = item.release_name || item.name || '';
+        const name = item.release_name || item.releaseName || item.name || '';
         return epRegex.test(name);
       });
 
@@ -110,9 +134,9 @@ async function getSubSource({ title, imdbId, season, episode, type, apiKey }, de
     }
 
     return list.map(item => {
-      const subId = item.id || item.subId || item.file;
+      const subId = item.subId || item.subtitleId || item.id || item.file;
       const lang = (item.language || item.lang || '').toLowerCase();
-      const name = item.release_name || item.name || '';
+      const name = item.release_name || item.releaseName || item.name || '';
       const isAss = name.toLowerCase().endsWith('.ass');
 
       return {
