@@ -7,10 +7,29 @@ function getAxiosConfig(extraHeaders = {}) {
       'Accept': 'application/json',
       ...extraHeaders
     },
-    timeout: 9000
+    timeout: 8000
   };
 }
 
+// جلب رابط التحميل المباشر والنهائي للملف من الـ API الرسمي
+async function resolveDownloadLink(fileId, apiKey) {
+  if (!fileId || !apiKey) return null;
+  try {
+    const res = await axios.post(
+      'https://api.opensubtitles.com/api/v1/download',
+      { file_id: fileId },
+      getAxiosConfig({
+        'Api-Key': apiKey.trim(),
+        'Content-Type': 'application/json'
+      })
+    );
+    return res.data?.link || null;
+  } catch (e) {
+    return null;
+  }
+}
+
+// السحب من الـ API الرسمي لـ OpenSubtitles
 async function fetchOpenSubtitlesOfficial(imdbId, season, episode, apiKey) {
   if (!apiKey || !imdbId || !imdbId.startsWith('tt')) return [];
 
@@ -28,7 +47,7 @@ async function fetchOpenSubtitlesOfficial(imdbId, season, episode, apiKey) {
     const res = await axios.get(url, getAxiosConfig({ 'Api-Key': apiKey.trim() }));
     const data = res.data?.data || [];
 
-    const subs = [];
+    const candidates = [];
 
     data.forEach(item => {
       const attr = item.attributes || {};
@@ -47,26 +66,48 @@ async function fetchOpenSubtitlesOfficial(imdbId, season, episode, apiKey) {
         }
 
         if (file.file_id) {
-          subs.push({
-            url: `https://api.opensubtitles.com/api/v1/download/${file.file_id}`,
+          candidates.push({
+            fileId: file.file_id,
             lang: isAr ? 'ara' : 'eng',
             format: detectedFormat,
             ext: detectedFormat,
             fileName: file.file_name || attr.release || '',
             origName: file.file_name || attr.release || 'OpenSubtitles Official',
-            _source: 'opensubtitles-api',
+            _source: 'opensubtitles',
             _priority: isAr ? (detectedFormat === 'ass' ? 0 : 1) : 3
           });
         }
       });
     });
 
-    return subs;
+    // تحويل الترجمات لروابط تحميل مباشرة بالتوازي
+    const resolvedSubs = await Promise.allSettled(
+      candidates.map(async item => {
+        const directUrl = await resolveDownloadLink(item.fileId, apiKey);
+        if (!directUrl) return null;
+        return {
+          url: directUrl,
+          lang: item.lang,
+          format: item.format,
+          ext: item.ext,
+          fileName: item.fileName,
+          origName: item.origName,
+          _source: item._source,
+          _priority: item._priority
+        };
+      })
+    );
+
+    return resolvedSubs
+      .filter(r => r.status === 'fulfilled' && r.value)
+      .map(r => r.value);
+
   } catch (e) {
     return [];
   }
 }
 
+// السحب من سيرفر الـ Mirror العام
 async function fetchOpenSubtitlesMirror(imdbId, season, episode, type) {
   if (!imdbId || !imdbId.startsWith('tt')) return [];
   try {
@@ -90,26 +131,40 @@ async function fetchOpenSubtitlesMirror(imdbId, season, episode, type) {
         ext: isAss ? 'ass' : 'srt',
         fileName: s.title || s.name || '',
         origName: s.title || s.name || 'OpenSubtitles Mirror',
-        _source: 'opensubtitles-mirror',
-        _priority: isArabic ? (isAss ? 1 : 2) : 4
+        _source: 'opensubtitles',
+        _priority: isArabic ? (isAss ? 0 : 1) : 3
       };
-    });
+    }).filter(s => s.url);
   } catch (e) {
     return [];
   }
 }
 
+// الدالة الرئيسية المستدعاة بملف index.js
 async function getOpenSubtitles({ imdbId, season, episode, type, apiKey }) {
   if (!imdbId || !imdbId.startsWith('tt')) return [];
 
+  const tasks = [
+    fetchOpenSubtitlesMirror(imdbId, season, episode, type)
+  ];
+
   if (apiKey) {
-    const officialSubs = await fetchOpenSubtitlesOfficial(imdbId, season, episode, apiKey);
-    if (officialSubs.length > 0) {
-      return officialSubs;
-    }
+    tasks.unshift(fetchOpenSubtitlesOfficial(imdbId, season, episode, apiKey));
   }
 
-  return await fetchOpenSubtitlesMirror(imdbId, season, episode, type);
+  const results = await Promise.allSettled(tasks);
+  const all = results
+    .filter(r => r.status === 'fulfilled')
+    .flatMap(r => r.value)
+    .filter(s => s && s.url);
+
+  // منع تكرار الروابط المتطابقة
+  const seen = new Set();
+  return all.filter(s => {
+    if (seen.has(s.url)) return false;
+    seen.add(s.url);
+    return true;
+  });
 }
 
 module.exports = { getOpenSubtitles };
