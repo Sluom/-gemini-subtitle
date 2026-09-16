@@ -74,14 +74,14 @@ async function fetchOfficial(imdbId, season, episode, type, apiKey) {
     baseParams.imdb_id = cleanNumericId;
   }
 
-  // نطلب ملفات ASS/SSA بطلب مخصص وملفات SRT بطلب مخصص لضمان عدم ضياعها بسبب الترقيم
-  let [assItems, srtItems] = await Promise.all([
-    searchOpenSubtitlesApi({ ...baseParams, formats: 'ass,ssa' }, apiKey),
-    searchOpenSubtitlesApi({ ...baseParams, formats: 'srt' }, apiKey)
+  // سحب الصفحة الأولى والثانية لضمان جلب ملفات ASS المضمومة بعد ملفات SRT
+  let [page1Items, page2Items] = await Promise.all([
+    searchOpenSubtitlesApi({ ...baseParams, page: 1 }, apiKey),
+    searchOpenSubtitlesApi({ ...baseParams, page: 2 }, apiKey)
   ]);
 
   // فحص احتياطي برقم imdb_id المباشر في حال لم ترجع نتائج بـ parent_imdb_id
-  if (!assItems.length && !srtItems.length && isEpisodic) {
+  if (!page1Items.length && !page2Items.length && isEpisodic) {
     const fallbackParams = {
       imdb_id: cleanNumericId,
       languages: 'ar,ara'
@@ -89,23 +89,25 @@ async function fetchOfficial(imdbId, season, episode, type, apiKey) {
     if (season != null) fallbackParams.season_number = season;
     if (episode != null) fallbackParams.episode_number = episode;
 
-    const [fbAss, fbSrt] = await Promise.all([
-      searchOpenSubtitlesApi({ ...fallbackParams, formats: 'ass,ssa' }, apiKey),
-      searchOpenSubtitlesApi({ ...fallbackParams, formats: 'srt' }, apiKey)
+    const [fbPage1, fbPage2] = await Promise.all([
+      searchOpenSubtitlesApi({ ...fallbackParams, page: 1 }, apiKey),
+      searchOpenSubtitlesApi({ ...fallbackParams, page: 2 }, apiKey)
     ]);
-    assItems = fbAss;
-    srtItems = fbSrt;
+    page1Items = fbPage1;
+    page2Items = fbPage2;
   }
 
-  const allRawItems = [...assItems, ...srtItems];
+  const allRawItems = [...page1Items, ...page2Items];
   const results = [];
+  const seenFileIds = new Set(); // لمنع تكرار الترجمات
 
   allRawItems.forEach(item => {
     const attr = item.attributes || {};
     const files = attr.files || [];
 
     files.forEach(file => {
-      if (!file.file_id) return;
+      if (!file.file_id || seenFileIds.has(file.file_id)) return;
+      seenFileIds.add(file.file_id);
 
       const isAss = checkIsAss(file, attr);
       const format = isAss ? 'ass' : 'srt';
