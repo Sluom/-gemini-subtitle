@@ -28,6 +28,58 @@ function buildSubDLStremConfig(apiKey) {
   }
 }
 
+async function fetchSubDLOfficial(imdbId, season, episode, type, apiKey) {
+  if (!apiKey || !imdbId || !imdbId.startsWith('tt')) return [];
+
+  try {
+    const params = new URLSearchParams({
+      api_key: apiKey.trim(),
+      imdb_id: imdbId,
+      languages: 'AR,EN'
+    });
+
+    if (season) params.set('season_number', String(season));
+    if (episode) params.set('episode_number', String(episode));
+    if (type) params.set('type', type === 'series' ? 'series' : 'movie');
+
+    const res = await axios.get(`https://api.subdl.com/api/v1/subtitles?${params.toString()}`, {
+      headers: {
+        'User-Agent': getRandomUA(),
+        'Accept': 'application/json'
+      },
+      timeout: 8000
+    });
+
+    if (!res.data?.status || !Array.isArray(res.data?.subtitles)) return [];
+
+    return res.data.subtitles.map(item => {
+      const langRaw = (item.lang || item.language || 'Arabic').toLowerCase();
+      const isAr = langRaw.startsWith('ar');
+      const releaseName = item.release_name || item.name || '';
+      const isAss = releaseName.toLowerCase().endsWith('.ass') || releaseName.toLowerCase().includes('.ass');
+
+      let dlUrl = item.url || '';
+      if (dlUrl && !dlUrl.startsWith('http')) {
+        dlUrl = `https://dl.subdl.com${dlUrl.startsWith('/') ? '' : '/'}${dlUrl}`;
+      }
+
+      return {
+        url: dlUrl,
+        lang: isAr ? 'ara' : 'eng',
+        format: isAss ? 'ass' : 'srt',
+        fileName: releaseName,
+        origName: releaseName || 'SubDL Official',
+        _source: 'subdl',
+        _isZip: true,
+        _episode: episode || 1,
+        _priority: isAr ? (isAss ? 0 : 1) : 3
+      };
+    }).filter(s => s.url);
+  } catch (e) {
+    return [];
+  }
+}
+
 async function fetchSubDLStremTop(imdbId, season, episode, type, apiKey) {
   if (!imdbId || !imdbId.startsWith('tt')) return [];
 
@@ -53,14 +105,17 @@ async function fetchSubDLStremTop(imdbId, season, episode, type, apiKey) {
     return list.map(item => {
       const langRaw = (item.lang || 'ara').toLowerCase();
       const isArabic = langRaw.startsWith('ar') || langRaw === 'ara';
+      const isAss = (item.url || '').toLowerCase().includes('.ass') || (item.id || '').toLowerCase().includes('.ass');
 
       return {
         url: item.url,
         lang: isArabic ? 'ara' : 'eng',
-        origName: item.id || 'SubDL',
+        format: isAss ? 'ass' : 'srt',
+        fileName: item.id || '',
+        origName: item.id || 'SubDL Strem',
         _source: 'subdl',
         _isZip: false,
-        _priority: isArabic ? 1 : 2
+        _priority: isArabic ? 2 : 3
       };
     }).filter(s => s.url);
   } catch (err) {
@@ -81,14 +136,21 @@ async function fetchSubDLMirror(imdbId, season, episode, type) {
       }
     );
 
-    return (r.data?.subtitles || []).map(s => ({
-      url: s.url,
-      lang: (s.lang || 'ara').toLowerCase().startsWith('ar') ? 'ara' : 'eng',
-      origName: s.title || s.name || 'SubDL Mirror',
-      _source: 'subdl',
-      _isZip: false,
-      _priority: 2
-    }));
+    return (r.data?.subtitles || []).map(s => {
+      const isArabic = (s.lang || 'ara').toLowerCase().startsWith('ar');
+      const isAss = (s.url || '').toLowerCase().includes('.ass') || (s.title || '').toLowerCase().includes('.ass');
+
+      return {
+        url: s.url,
+        lang: isArabic ? 'ara' : 'eng',
+        format: isAss ? 'ass' : 'srt',
+        fileName: s.title || s.name || '',
+        origName: s.title || s.name || 'SubDL Mirror',
+        _source: 'subdl',
+        _isZip: false,
+        _priority: 3
+      };
+    });
   } catch (e) {
     return [];
   }
@@ -97,10 +159,14 @@ async function fetchSubDLMirror(imdbId, season, episode, type) {
 async function getSubDL({ imdbId, season, episode, type, apiKey }) {
   if (!imdbId || !imdbId.startsWith('tt')) return [];
 
-  const requests = [
-    fetchSubDLStremTop(imdbId, season, episode, type, apiKey),
-    fetchSubDLMirror(imdbId, season, episode, type)
-  ];
+  const requests = [];
+
+  if (apiKey) {
+    requests.push(fetchSubDLOfficial(imdbId, season, episode, type, apiKey));
+  }
+
+  requests.push(fetchSubDLStremTop(imdbId, season, episode, type, apiKey));
+  requests.push(fetchSubDLMirror(imdbId, season, episode, type));
 
   const results = await Promise.allSettled(requests);
   return results
