@@ -548,8 +548,39 @@ app.get([
       .flatMap(r => r.value)
       .filter(s => s && s.url);
 
+    const sourceCounters = {};
+
     const formatted = allSubs.map((s, idx) => {
       let finalUrl = s.url;
+      const lowerUrl = (s.url || '').toLowerCase();
+
+      let ext = 'SRT';
+      if (lowerUrl.includes('.ass') || s.format === 'ass') {
+        ext = 'ASS';
+      } else if (lowerUrl.includes('.vtt') || s.format === 'vtt') {
+        ext = 'VTT';
+      }
+
+      const rawSource = (s._source || '').toLowerCase();
+      let siteName = 'Subtitles';
+
+      if (rawSource.includes('opensubtitles')) {
+        siteName = 'OpenSubtitles';
+      } else if (rawSource.includes('subdl')) {
+        siteName = 'SubDL';
+      } else if (rawSource.includes('subsource')) {
+        siteName = 'SubSource';
+      } else if (rawSource.includes('animetosho') || rawSource.includes('anime')) {
+        siteName = 'AnimeTosho';
+      } else if (rawSource.includes('jimaku')) {
+        siteName = 'Jimaku';
+      } else if (s._source) {
+        siteName = s._source;
+      }
+
+      const groupKey = `${siteName}-${ext}`;
+      sourceCounters[groupKey] = (sourceCounters[groupKey] || 0) + 1;
+      const count = sourceCounters[groupKey];
 
       if (s._isZip) {
         finalUrl = `${baseUrl}/stream-zip.srt?url=${encodeURIComponent(s.url)}&ep=${s._episode || episode || 1}`;
@@ -558,7 +589,7 @@ app.get([
       }
 
       return {
-        id: `${s._source || 'sub'}_${idx}`,
+        id: `${siteName} - ${ext} #${count}`,
         url: finalUrl,
         lang: s.lang || 'ara',
         _priority: s._priority || 2
