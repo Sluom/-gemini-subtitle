@@ -10,6 +10,15 @@ const { getSubDL } = require('./subdl');
 const { getSubSource, fetchSubSourceBuffer } = require('./subsource');
 const { getAnimeSubtitles } = require('./anime');
 
+// استدعاء آمن لـ Wyzie بدون كسر السيرفر إذا لم يكن الملف موجوداً
+let getWyzie = null;
+try {
+  const wyzieMod = require('./wyzie');
+  getWyzie = wyzieMod.getWyzie || wyzieMod.getSubtitles || wyzieMod;
+} catch (e) {
+  getWyzie = null;
+}
+
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -20,7 +29,7 @@ const MANIFEST = {
   id: 'org.nuvio.aggregated.subtitles',
   version: '25.0.0',
   name: 'Nuvio Multi-Source Subtitles',
-  description: 'Arabic & Multi-language subtitles from OpenSubtitles, SubDL, SubSource & Anime',
+  description: 'Arabic & Multi-language subtitles from OpenSubtitles, SubDL, SubSource, Wyzie & Anime',
   resources: ['subtitles'],
   types: ['movie', 'series', 'anime'],
   idPrefixes: ['tt', 'kitsu'],
@@ -119,6 +128,27 @@ function findEpisodeInZip(zip, episode) {
   return subEntries[0] || null;
 }
 
+// دالة فحص متعددة الطبقات لتحديد نوع الصيغة بدقة
+function detectFormat(s) {
+  const checkStr = [
+    s.format,
+    s.ext,
+    s.extension,
+    s.subFormat,
+    s.name,
+    s.fileName,
+    s.url
+  ].filter(Boolean).join(' ').toLowerCase();
+
+  if (checkStr.includes('.ass') || checkStr.includes('format=ass') || checkStr.includes(' ass ') || checkStr.endsWith(' ass') || s.format === 'ass') {
+    return 'ASS';
+  }
+  if (checkStr.includes('.vtt') || checkStr.includes('format=vtt') || s.format === 'vtt') {
+    return 'VTT';
+  }
+  return 'SRT';
+}
+
 app.post('/api/test-key', async (req, res) => {
   const { provider, key } = req.body;
   if (!key || !key.trim()) {
@@ -210,16 +240,6 @@ app.post('/api/test-key', async (req, res) => {
           });
           if (r2.status === 200 || r2.data?.status === true) valid = true;
         } catch (e2) {}
-      }
-
-      if (!valid) {
-        try {
-          const r3 = await axios.get('https://api.subdl.com/api/v1/subtitles?film_name=Inception&languages=EN', {
-            headers: { 'Authorization': `Bearer ${cleanKey}`, 'X-API-Key': cleanKey },
-            timeout: 7000
-          });
-          if (r3.status === 200 && (r3.data?.status === true || r3.data?.results)) valid = true;
-        } catch (e3) {}
       }
 
       if (valid) return res.json({ success: true, message: 'مفتاح SubDL صالح 100% ✅' });
@@ -506,40 +526,63 @@ app.get([
     const imdbId = media.imdbId;
     const season = media.season;
     const episode = media.episode;
-    const title = media.title;
+    let title = media.title;
     const mediaType = media.type || type;
 
+    // إذا لم يتوفر الاسم الصافي نستخدم كود الـ IMDb كبديل حتى لا تتوقف المواقع المعتمدة عليه
+    if (!title && imdbId) {
+      title = imdbId;
+    }
+
     const tasks = [
-      getAnimeSubtitles(targetId)
+      getAnimeSubtitles(targetId).catch(() => [])
     ];
 
     if (imdbId) {
-      tasks.push(getOpenSubtitles({
-        imdbId,
-        season,
-        episode,
-        type: mediaType,
-        apiKey: config.openSubtitlesKey
-      }));
+      tasks.push(
+        getOpenSubtitles({
+          imdbId,
+          season,
+          episode,
+          type: mediaType,
+          apiKey: config.openSubtitlesKey
+        }).catch(() => [])
+      );
 
-      tasks.push(getSubDL({
-        imdbId,
-        season,
-        episode,
-        type: mediaType,
-        apiKey: config.subdlKey
-      }));
+      tasks.push(
+        getSubDL({
+          imdbId,
+          season,
+          episode,
+          type: mediaType,
+          apiKey: config.subdlKey
+        }).catch(() => [])
+      );
     }
 
     if (config.subsourceKey && (title || imdbId)) {
-      tasks.push(getSubSource({
-        title,
-        imdbId,
-        season,
-        episode,
-        type: mediaType,
-        apiKey: config.subsourceKey
-      }));
+      tasks.push(
+        getSubSource({
+          title,
+          imdbId,
+          season,
+          episode,
+          type: mediaType,
+          apiKey: config.subsourceKey
+        }).catch(() => [])
+      );
+    }
+
+    if (getWyzie && config.wyzieKey && imdbId) {
+      tasks.push(
+        getWyzie({
+          imdbId,
+          season,
+          episode,
+          type: mediaType,
+          apiKey: config.wyzieKey
+        }).catch(() => [])
+      );
     }
 
     const settled = await Promise.allSettled(tasks);
@@ -552,14 +595,7 @@ app.get([
 
     const formatted = allSubs.map((s, idx) => {
       let finalUrl = s.url;
-      const lowerUrl = (s.url || '').toLowerCase();
-
-      let ext = 'SRT';
-      if (lowerUrl.includes('.ass') || s.format === 'ass') {
-        ext = 'ASS';
-      } else if (lowerUrl.includes('.vtt') || s.format === 'vtt') {
-        ext = 'VTT';
-      }
+      const ext = detectFormat(s);
 
       const rawSource = (s._source || '').toLowerCase();
       let siteName = 'Subtitles';
@@ -570,6 +606,8 @@ app.get([
         siteName = 'SubDL';
       } else if (rawSource.includes('subsource')) {
         siteName = 'SubSource';
+      } else if (rawSource.includes('wyzie')) {
+        siteName = 'Wyzie';
       } else if (rawSource.includes('animetosho') || rawSource.includes('anime')) {
         siteName = 'AnimeTosho';
       } else if (rawSource.includes('jimaku')) {
@@ -586,6 +624,9 @@ app.get([
         finalUrl = `${baseUrl}/stream-zip.srt?url=${encodeURIComponent(s.url)}&ep=${s._episode || episode || 1}`;
       } else if (s.url.startsWith('subsource://')) {
         finalUrl = `${baseUrl}/stream-subsource.srt?data=${encodeURIComponent(s.url)}`;
+      } else if (rawSource.includes('opensubtitles') || s.url.includes('opensubtitles.com')) {
+        // توجيه روابط OpenSubtitles عبر بروكسي السيرفر لضمان إرسال الترويسات ومنع أخطاء 401 و 403
+        finalUrl = `${baseUrl}/stream-os.srt?url=${encodeURIComponent(s.url)}&key=${encodeURIComponent(config.openSubtitlesKey || '')}&format=${ext.toLowerCase()}`;
       }
 
       return {
@@ -622,6 +663,54 @@ app.get([
   }
 });
 
+// بروكسي OpenSubtitles لحل مشاكل الترويسات والصلاحيات وفك الضغط
+app.all(['/stream-os', '/stream-os.srt'], async (req, res) => {
+  if (req.method === 'OPTIONS') return res.sendStatus(200);
+  const subUrl = req.query.url;
+  const apiKey = req.query.key || '';
+  const requestedFormat = req.query.format || 'srt';
+
+  if (!subUrl) return res.status(400).send('Missing URL');
+
+  try {
+    const headers = {
+      'User-Agent': 'NuvioSubtitles v1.0',
+      'Accept': '*/*'
+    };
+    if (apiKey) {
+      headers['Api-Key'] = apiKey;
+    }
+
+    const response = await axios.get(subUrl, {
+      responseType: 'arraybuffer',
+      timeout: 10000,
+      headers
+    });
+
+    let buffer = Buffer.from(response.data);
+
+    if (buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4b) {
+      const zip = new AdmZip(buffer);
+      const entries = zip.getEntries();
+      const subEntry = entries.find(e => !e.isDirectory && (e.entryName.endsWith('.srt') || e.entryName.endsWith('.ass') || e.entryName.endsWith('.vtt')));
+      if (subEntry) {
+        buffer = subEntry.getData();
+      }
+    }
+
+    const fixedBuffer = fixArabicEncoding(buffer);
+    const contentCheck = fixedBuffer.slice(0, 300).toString('utf-8');
+    const isAss = requestedFormat === 'ass' || contentCheck.includes('[Script Info]');
+
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Headers', '*');
+    res.setHeader('Content-Type', isAss ? 'text/x-ssa; charset=utf-8' : 'application/x-subrip; charset=utf-8');
+    res.send(fixedBuffer);
+  } catch (e) {
+    res.status(500).send('Error streaming OpenSubtitles');
+  }
+});
+
 app.all(['/stream-zip', '/stream-zip.srt'], async (req, res) => {
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   const zipUrl = req.query.url;
@@ -645,7 +734,7 @@ app.all(['/stream-zip', '/stream-zip.srt'], async (req, res) => {
 
     const rawContent = entry.getData();
     const content = fixArabicEncoding(rawContent);
-    const isAss = entry.entryName.toLowerCase().endsWith('.ass');
+    const isAss = entry.entryName.toLowerCase().endsWith('.ass') || content.slice(0, 300).toString('utf-8').includes('[Script Info]');
 
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', '*');
@@ -677,6 +766,9 @@ app.all(['/stream-subsource', '/stream-subsource.srt'], async (req, res) => {
     }
 
     finalBuffer = fixArabicEncoding(finalBuffer);
+    if (finalBuffer.slice(0, 300).toString('utf-8').includes('[Script Info]')) {
+      isAss = true;
+    }
 
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', '*');
