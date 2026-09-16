@@ -3,6 +3,7 @@ const cors = require('cors');
 const axios = require('axios');
 const AdmZip = require('adm-zip');
 const iconv = require('iconv-lite');
+const zlib = require('zlib');
 
 const { resolveMedia } = require('./idMapper');
 const { getOpenSubtitles } = require('./opensubtitles');
@@ -100,7 +101,7 @@ function getBaseUrl(req) {
 function findEpisodeInZip(zip, episode) {
   const entries = zip.getEntries();
   const epNum = parseInt(episode, 10);
-  const validExts = ['.srt', '.ass', '.vtt'];
+  const validExts = ['.srt', '.ass', '.ssa', '.vtt'];
 
   const subEntries = entries.filter(e => {
     const name = e.entryName.toLowerCase();
@@ -119,12 +120,18 @@ function findEpisodeInZip(zip, episode) {
   for (const pattern of patterns) {
     const matches = subEntries.filter(e => pattern.test(e.entryName));
     if (matches.length > 0) {
-      const assMatch = matches.find(e => e.entryName.toLowerCase().endsWith('.ass'));
+      const assMatch = matches.find(e => {
+        const n = e.entryName.toLowerCase();
+        return n.endsWith('.ass') || n.endsWith('.ssa');
+      });
       return assMatch || matches[0];
     }
   }
 
-  const defaultAss = subEntries.find(e => e.entryName.toLowerCase().endsWith('.ass'));
+  const defaultAss = subEntries.find(e => {
+    const n = e.entryName.toLowerCase();
+    return n.endsWith('.ass') || n.endsWith('.ssa');
+  });
   return defaultAss || subEntries[0] || null;
 }
 
@@ -134,13 +141,19 @@ function detectFormat(s) {
     s.ext,
     s.extension,
     s.subFormat,
+    s.SubFormat,
     s.name,
     s.fileName,
     s.origName,
     s.url
   ].filter(Boolean).join(' ').toLowerCase();
 
-  if (s.format === 'ass' || checkStr.includes('.ass') || checkStr.includes('format=ass')) {
+  if (
+    checkStr.includes('ssa') ||
+    checkStr.includes('ass') ||
+    checkStr.includes('format=ass') ||
+    checkStr.includes('format=ssa')
+  ) {
     return 'ASS';
   }
   if (checkStr.includes('.vtt') || checkStr.includes('format=vtt') || s.format === 'vtt') {
@@ -606,12 +619,16 @@ app.get([
         finalUrl = `${baseUrl}/stream-subsource.${isAssTrack ? 'ass' : 'srt'}?data=${encodeURIComponent(s.url)}`;
       } else if (s.url.startsWith('os://')) {
         finalUrl = `${baseUrl}/stream-os.${isAssTrack ? 'ass' : 'srt'}?data=${encodeURIComponent(s.url)}&key=${encodeURIComponent(config.openSubtitlesKey || '')}`;
+      } else if (isAssTrack && (!finalUrl.toLowerCase().endsWith('.ass') && !finalUrl.toLowerCase().endsWith('.ssa'))) {
+        // توجيه ترجمات SSA/ASS القادمة كروابط مباشرة عبر بروكسي لضمان صيغة .ass ومعالجة الضغط والترميز
+        finalUrl = `${baseUrl}/stream-proxy.ass?url=${encodeURIComponent(finalUrl)}`;
       }
 
       return {
         id: `${siteName} - ${ext} #${count}`,
         url: finalUrl,
         lang: s.lang || 'ara',
+        format: ext.toLowerCase(),
         _priority: s._priority || 2
       };
     });
@@ -638,7 +655,60 @@ app.get([
   }
 });
 
-// مسار فك وتشغيل ترجمات OpenSubtitles الفردية عند الضغط عليها فقط
+// بروكسي عام لفك ضغط وسحب وتدفق ملفات الترجمة المباشرة (OpenSubtitles Mirror وغيره) بصيغة ASS خام
+app.all(['/stream-proxy', '/stream-proxy.srt', '/stream-proxy.ass'], async (req, res) => {
+  if (req.method === 'OPTIONS') return res.sendStatus(200);
+  const targetUrl = req.query.url;
+  if (!targetUrl) return res.status(400).send('Missing URL');
+
+  try {
+    const response = await axios.get(targetUrl, {
+      responseType: 'arraybuffer',
+      timeout: 10000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      }
+    });
+
+    let buffer = Buffer.from(response.data);
+
+    // فك ضغط Gzip في حال كان الملف مضغوطاً عبر سيرفر OpenSubtitles
+    if (buffer.length >= 2 && buffer[0] === 0x1f && buffer[1] === 0x8b) {
+      buffer = zlib.gunzipSync(buffer);
+    }
+
+    // فك ضغط ZIP في حال كان ملف أرشيف
+    if (buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4b) {
+      const zip = new AdmZip(buffer);
+      const entries = zip.getEntries();
+      const assEntry = entries.find(e => !e.isDirectory && (e.entryName.toLowerCase().endsWith('.ass') || e.entryName.toLowerCase().endsWith('.ssa')));
+      const subEntry = entries.find(e => !e.isDirectory && e.entryName.toLowerCase().endsWith('.srt'));
+      if (assEntry) buffer = assEntry.getData();
+      else if (subEntry) buffer = subEntry.getData();
+    }
+
+    const fixedBuffer = fixArabicEncoding(buffer);
+    const contentCheck = fixedBuffer.slice(0, 500).toString('utf-8');
+    const isAss = contentCheck.includes('[Script Info]') || contentCheck.includes('V4+ Styles') || req.path.endsWith('.ass');
+
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Headers', '*');
+
+    if (isAss) {
+      res.setHeader('Content-Type', 'text/x-ssa; charset=utf-8');
+      res.setHeader('Content-Disposition', 'inline; filename="subtitle.ass"');
+    } else {
+      res.setHeader('Content-Type', 'application/x-subrip; charset=utf-8');
+      res.setHeader('Content-Disposition', 'inline; filename="subtitle.srt"');
+    }
+
+    res.send(fixedBuffer);
+  } catch (e) {
+    res.status(500).send('Error proxying subtitle');
+  }
+});
+
+// مسار فك وتشغيل ترجمات OpenSubtitles الفردية عبر الـ API الرسمي
 app.all(['/stream-os', '/stream-os.srt', '/stream-os.ass'], async (req, res) => {
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   const dataUrl = req.query.data || '';
@@ -680,6 +750,10 @@ app.all(['/stream-os', '/stream-os.srt', '/stream-os.ass'], async (req, res) => 
     });
 
     let buffer = Buffer.from(fileRes.data);
+
+    if (buffer.length >= 2 && buffer[0] === 0x1f && buffer[1] === 0x8b) {
+      buffer = zlib.gunzipSync(buffer);
+    }
 
     if (buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4b) {
       const zip = new AdmZip(buffer);
@@ -768,15 +842,15 @@ app.all(['/stream-subsource', '/stream-subsource.srt', '/stream-subsource.ass'],
   try {
     const buffer = await fetchSubSourceBuffer(dataUrl);
     let finalBuffer = buffer;
-    let isAss = dataUrl.includes('.ass');
+    let isAss = dataUrl.includes('.ass') || dataUrl.includes('.ssa');
 
     if (buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4b) {
       const zip = new AdmZip(buffer);
       const entries = zip.getEntries();
-      const subEntry = entries.find(e => !e.isDirectory && (e.entryName.endsWith('.srt') || e.entryName.endsWith('.ass')));
+      const subEntry = entries.find(e => !e.isDirectory && (e.entryName.endsWith('.srt') || e.entryName.endsWith('.ass') || e.entryName.endsWith('.ssa')));
       if (subEntry) {
         finalBuffer = subEntry.getData();
-        isAss = subEntry.entryName.toLowerCase().endsWith('.ass');
+        isAss = subEntry.entryName.toLowerCase().endsWith('.ass') || subEntry.entryName.toLowerCase().endsWith('.ssa');
       }
     }
 
