@@ -11,36 +11,6 @@ function getAxiosConfig(extraHeaders = {}) {
   };
 }
 
-async function fetchOpenSubtitlesMirror(imdbId, season, episode, type) {
-  if (!imdbId || !imdbId.startsWith('tt')) return [];
-  try {
-    const mediaType = season ? 'series' : (type === 'series' ? 'series' : 'movie');
-    const targetId = season ? `${imdbId}:${season}:${episode || 1}` : imdbId;
-    const res = await axios.get(
-      `https://opensubtitles-v3.strem.io/subtitles/${mediaType}/${targetId}.json`,
-      getAxiosConfig()
-    );
-
-    const subs = res.data?.subtitles || [];
-    return subs.map(s => {
-      const isArabic = (s.lang || 'ara').toLowerCase().startsWith('ar');
-      const isAss = (s.url || '').toLowerCase().includes('.ass') || (s.title || '').toLowerCase().includes('.ass');
-
-      return {
-        url: s.url,
-        lang: isArabic ? 'ara' : 'eng',
-        format: isAss ? 'ass' : 'srt',
-        fileName: s.title || s.name || '',
-        origName: s.title || s.name || 'OpenSubtitles Mirror',
-        _source: 'opensubtitles-mirror',
-        _priority: isArabic ? (isAss ? 0 : 2) : 3
-      };
-    });
-  } catch (e) {
-    return [];
-  }
-}
-
 async function fetchOpenSubtitlesOfficial(imdbId, season, episode, apiKey) {
   if (!apiKey || !imdbId || !imdbId.startsWith('tt')) return [];
 
@@ -63,14 +33,17 @@ async function fetchOpenSubtitlesOfficial(imdbId, season, episode, apiKey) {
       const file = (attr.files && attr.files[0]) || {};
       const lang = (attr.language || 'ara').toLowerCase();
       const isAr = lang.startsWith('ar');
-      
+
       const realFileName = file.file_name || attr.release || '';
-      const isAss = realFileName.toLowerCase().endsWith('.ass') || (attr.format || '').toLowerCase() === 'ass';
+      const isAss = realFileName.toLowerCase().endsWith('.ass') || 
+                    realFileName.toLowerCase().endsWith('.ssa') || 
+                    (attr.format || '').toLowerCase() === 'ass';
 
       return {
         url: file.file_id ? `https://api.opensubtitles.com/api/v1/download/${file.file_id}` : attr.url,
         lang: isAr ? 'ara' : 'eng',
         format: isAss ? 'ass' : 'srt',
+        ext: isAss ? 'ass' : 'srt',
         fileName: realFileName,
         origName: realFileName || 'OpenSubtitles Official',
         _source: 'opensubtitles-api',
@@ -82,22 +55,48 @@ async function fetchOpenSubtitlesOfficial(imdbId, season, episode, apiKey) {
   }
 }
 
+async function fetchOpenSubtitlesMirror(imdbId, season, episode, type) {
+  if (!imdbId || !imdbId.startsWith('tt')) return [];
+  try {
+    const mediaType = season ? 'series' : (type === 'series' ? 'series' : 'movie');
+    const targetId = season ? `${imdbId}:${season}:${episode || 1}` : imdbId;
+    const res = await axios.get(
+      `https://opensubtitles-v3.strem.io/subtitles/${mediaType}/${targetId}.json`,
+      getAxiosConfig()
+    );
+
+    const subs = res.data?.subtitles || [];
+    return subs.map(s => {
+      const isArabic = (s.lang || 'ara').toLowerCase().startsWith('ar');
+      const isAss = (s.url || '').toLowerCase().includes('.ass') || (s.title || '').toLowerCase().includes('.ass');
+
+      return {
+        url: s.url,
+        lang: isArabic ? 'ara' : 'eng',
+        format: isAss ? 'ass' : 'srt',
+        ext: isAss ? 'ass' : 'srt',
+        fileName: s.title || s.name || '',
+        origName: s.title || s.name || 'OpenSubtitles Mirror',
+        _source: 'opensubtitles-mirror',
+        _priority: isArabic ? (isAss ? 1 : 2) : 4
+      };
+    });
+  } catch (e) {
+    return [];
+  }
+}
+
 async function getOpenSubtitles({ imdbId, season, episode, type, apiKey }) {
   if (!imdbId || !imdbId.startsWith('tt')) return [];
 
-  const requests = [
-    fetchOpenSubtitlesMirror(imdbId, season, episode, type)
-  ];
-
   if (apiKey) {
-    requests.push(fetchOpenSubtitlesOfficial(imdbId, season, episode, apiKey));
+    const officialSubs = await fetchOpenSubtitlesOfficial(imdbId, season, episode, apiKey);
+    if (officialSubs.length > 0) {
+      return officialSubs;
+    }
   }
 
-  const settled = await Promise.allSettled(requests);
-  return settled
-    .filter(r => r.status === 'fulfilled')
-    .flatMap(r => r.value)
-    .filter(s => s && s.url);
+  return await fetchOpenSubtitlesMirror(imdbId, season, episode, type);
 }
 
 module.exports = { getOpenSubtitles };
