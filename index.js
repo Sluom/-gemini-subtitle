@@ -482,7 +482,6 @@ app.get(['/manifest.json', '/:config/manifest.json'], (req, res) => {
   res.json(MANIFEST);
 });
 
-// مسار شامل يتقبل أي إضافات يرسلها التي في بدون أخطاء 404
 app.get([
   '/subtitles/:type/:id', 
   '/subtitles/:type/:id/:extra',
@@ -552,8 +551,6 @@ app.get([
     const formatted = allSubs.map((s, idx) => {
       let finalUrl = s.url;
 
-      // العودة لأسلوب الكود الأول السريع:
-      // فقط الملفات المحتاجة استخراج إجباري تمر بالسيرفر، والباقي روابط مباشرة وسريعة للتي في
       if (s._isZip) {
         finalUrl = `${baseUrl}/stream-zip.srt?url=${encodeURIComponent(s.url)}&ep=${s._episode || episode || 1}`;
       } else if (s.url.startsWith('subsource://')) {
@@ -659,4 +656,10 @@ app.all(['/stream-subsource', '/stream-subsource.srt'], async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {});
+if (process.env.NODE_ENV !== 'production') {
+  app.listen(PORT, () => {
+    console.log(`Server listening on port ${PORT}`);
+  });
+}
+
+module.exports = app;
