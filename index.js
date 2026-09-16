@@ -147,7 +147,7 @@ function detectFormat(s) {
   return 'SRT';
 }
 
-app.post('/api/test-key', async (req, res) => {
+app.post(['/api/test-key', '/test-key'], async (req, res) => {
   const { provider, key } = req.body;
   if (!key || !key.trim()) {
     return res.json({ success: false, message: 'يرجى إدخال المفتاح أولاً ⚠️', status: 'warn' });
@@ -203,7 +203,7 @@ app.post('/api/test-key', async (req, res) => {
       let valid = false;
       try {
         const r1 = await axios.get('https://api.opensubtitles.com/api/v1/infos/formats', {
-          headers: { 'Api-Key': cleanKey, 'User-Agent': 'NuvioSubtitles v1.0' },
+          headers: { 'Api-Key': cleanKey, 'User-Agent': 'Mozilla/5.0' },
           timeout: 7000
         });
         if (r1.status === 200) valid = true;
@@ -212,7 +212,7 @@ app.post('/api/test-key', async (req, res) => {
       if (!valid) {
         try {
           const r2 = await axios.get('https://api.opensubtitles.com/api/v1/subtitles?imdb_id=0133093', {
-            headers: { 'Api-Key': cleanKey, 'User-Agent': 'NuvioSubtitles v1.0' },
+            headers: { 'Api-Key': cleanKey, 'User-Agent': 'Mozilla/5.0' },
             timeout: 7000
           });
           if (r2.status === 200) valid = true;
@@ -224,21 +224,11 @@ app.post('/api/test-key', async (req, res) => {
       let valid = false;
       try {
         const r1 = await axios.get(`https://api.subdl.com/api/v1/subtitles?api_key=${cleanKey}&imdb_id=tt0111161`, {
-          headers: { 'Authorization': `Bearer ${cleanKey}`, 'X-API-Key': cleanKey },
+          headers: { 'User-Agent': 'Mozilla/5.0' },
           timeout: 7000
         });
         if (r1.status === 200 && (r1.data?.status === true || r1.data?.results)) valid = true;
       } catch (e1) {}
-
-      if (!valid) {
-        try {
-          const r2 = await axios.get('https://api.subdl.com/api/v2/me', {
-            headers: { 'Authorization': `Bearer ${cleanKey}`, 'X-API-Key': cleanKey },
-            timeout: 7000
-          });
-          if (r2.status === 200 || r2.data?.status === true) valid = true;
-        } catch (e2) {}
-      }
 
       if (valid) return res.json({ success: true, message: 'مفتاح SubDL صالح 100% ✅' });
     } else if (provider === 'wyzie') {
@@ -249,36 +239,6 @@ app.post('/api/test-key', async (req, res) => {
   } catch (err) {
     const errorDetail = err.response?.data?.error?.message || err.response?.data?.message || err.message || 'Service unavailable';
     return res.json({ success: false, message: `فشل الفحص: ${errorDetail} ❌`, status: 'error' });
-  }
-});
-
-// مسار الفحص والتشخيص المباشر لـ SubSource
-app.get(['/api/debug-subsource', '/:config/api/debug-subsource'], async (req, res) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Headers', '*');
-  res.setHeader('Content-Type', 'application/json');
-
-  const config = parseConfig(req);
-  const imdbId = req.query.id || 'tt0111161';
-
-  try {
-    const media = await resolveMedia(imdbId, 'movie');
-    const diagnostic = await getSubSource({
-      title: media.title || '',
-      imdbId: media.imdbId || imdbId,
-      apiKey: config.subsourceKey
-    }, true);
-
-    res.json({
-      serverConfigStatus: {
-        hasSubSourceKey: !!config.subsourceKey,
-        keyLength: config.subsourceKey ? config.subsourceKey.length : 0
-      },
-      mediaResolved: media,
-      subsourceDiagnostic: diagnostic
-    });
-  } catch (e) {
-    res.json({ error: e.message });
   }
 });
 
@@ -320,71 +280,6 @@ function renderHtml(config) {
 <body>
   <div class="container">
     <h1 class="main-title">إعدادات كافة مواقع ومفاتيح الترجمة</h1>
-
-    <div class="section-title">🤖 محركات الذكاء الاصطناعي (للترجمة الفورية)</div>
-
-    <div class="card">
-      <div class="card-header">
-        <a href="https://aistudio.google.com/app/apikey" target="_blank" class="btn-get">احصل على المفتاح 🔗</a>
-        <span class="card-label">:Google Gemini API مفتاح</span>
-      </div>
-      <div class="input-row">
-        <button class="btn-check" onclick="checkKey('gemini')">فحص</button>
-        <input type="text" id="geminiKey" class="input-field" value="${config.geminiKey || ''}">
-      </div>
-      <div id="status-gemini" class="status-box"></div>
-    </div>
-
-    <div class="card">
-      <div class="card-header">
-        <a href="https://console.groq.com/keys" target="_blank" class="btn-get">احصل على المفتاح 🔗</a>
-        <span class="card-label">:(فائق السرعة) Groq API مفتاح</span>
-      </div>
-      <div class="input-row">
-        <button class="btn-check" onclick="checkKey('groq')">فحص</button>
-        <input type="text" id="groqKey" class="input-field" value="${config.groqKey || ''}">
-      </div>
-      <div id="status-groq" class="status-box"></div>
-    </div>
-
-    <div class="card">
-      <div class="card-header">
-        <a href="https://www.deepl.com/pro-api" target="_blank" class="btn-get">احصل على المفتاح 🔗</a>
-        <span class="card-label">:DeepL API مفتاح</span>
-      </div>
-      <div class="input-row">
-        <button class="btn-check" onclick="checkKey('deepl')">فحص</button>
-        <input type="text" id="deeplKey" class="input-field" value="${config.deeplKey || ''}">
-      </div>
-      <div id="status-deepl" class="status-box"></div>
-    </div>
-
-    <div class="card">
-      <div class="card-header">
-        <a href="https://platform.openai.com/api-keys" target="_blank" class="btn-get">احصل على المفتاح 🔗</a>
-        <span class="card-label">:OpenAI API مفتاح</span>
-      </div>
-      <div class="input-row">
-        <button class="btn-check" onclick="checkKey('openai')">فحص</button>
-        <input type="text" id="openAIKey" class="input-field" value="${config.openAIKey || ''}">
-      </div>
-      <div id="status-openai" class="status-box"></div>
-    </div>
-
-    <div class="section-title">🎌 مواقع ومصادر ترجمات الأنمي التخصصية</div>
-
-    <div class="card">
-      <div class="card-header">
-        <a href="https://jimaku.cc" target="_blank" class="btn-get">احصل على المفتاح 🔗</a>
-        <span class="card-label">:(اختياري للأنمي) Jimaku.cc API مفتاح</span>
-      </div>
-      <div class="input-row">
-        <button class="btn-check" onclick="checkKey('jimaku')">فحص</button>
-        <input type="text" id="jimakuKey" class="input-field" placeholder="Jimaku API Token" value="${config.jimakuKey || ''}">
-      </div>
-      <div id="status-jimaku" class="status-box"></div>
-    </div>
-
     <div class="section-title">🌐 قواعد بيانات ومزودات الترجمة العامة</div>
 
     <div class="card">
@@ -423,18 +318,6 @@ function renderHtml(config) {
       <div id="status-subdl" class="status-box"></div>
     </div>
 
-    <div class="card">
-      <div class="card-header">
-        <a href="https://wyzie.ru" target="_blank" class="btn-get">احصل على المفتاح 🔗</a>
-        <span class="card-label">:Wyzie Subs API مفتاح</span>
-      </div>
-      <div class="input-row">
-        <button class="btn-check" onclick="checkKey('wyzie')">فحص</button>
-        <input type="text" id="wyzieKey" class="input-field" value="${config.wyzieKey || ''}">
-      </div>
-      <div id="status-wyzie" class="status-box"></div>
-    </div>
-
     <div class="actions">
       <button class="btn-action btn-install" onclick="installAddon()">تثبيت الإضافة في Nuvio 🚀</button>
       <button class="btn-action btn-copy" onclick="copyManifestUrl()">نسخ رابط المانيفست (Manifest URL) 📋</button>
@@ -443,14 +326,7 @@ function renderHtml(config) {
 
   <script>
     async function checkKey(provider) {
-      const input = document.getElementById(provider === 'gemini' ? 'geminiKey' :
-                                           provider === 'groq' ? 'groqKey' :
-                                           provider === 'deepl' ? 'deeplKey' :
-                                           provider === 'openai' ? 'openAIKey' :
-                                           provider === 'jimaku' ? 'jimakuKey' :
-                                           provider === 'subsource' ? 'subsourceKey' :
-                                           provider === 'opensubtitles' ? 'openSubtitlesKey' :
-                                           provider === 'subdl' ? 'subdlKey' : 'wyzieKey');
+      const input = document.getElementById(provider + 'Key');
       const statusEl = document.getElementById('status-' + provider);
       const val = input.value.trim();
 
@@ -466,13 +342,7 @@ function renderHtml(config) {
         });
         const data = await res.json();
         statusEl.innerText = data.message;
-        if (data.success) {
-          statusEl.className = 'status-box success';
-        } else if (data.status === 'warn') {
-          statusEl.className = 'status-box warn';
-        } else {
-          statusEl.className = 'status-box error';
-        }
+        statusEl.className = data.success ? 'status-box success' : (data.status === 'warn' ? 'status-box warn' : 'status-box error');
       } catch (e) {
         statusEl.className = 'status-box error';
         statusEl.innerText = 'فشل الاتصال بالسيرفر ❌';
@@ -481,33 +351,23 @@ function renderHtml(config) {
 
     function buildConfigString() {
       const payload = {
-        geminiKey: document.getElementById('geminiKey').value.trim(),
-        groqKey: document.getElementById('groqKey').value.trim(),
-        deeplKey: document.getElementById('deeplKey').value.trim(),
-        openAIKey: document.getElementById('openAIKey').value.trim(),
-        jimakuKey: document.getElementById('jimakuKey').value.trim(),
         subsourceKey: document.getElementById('subsourceKey').value.trim(),
         openSubtitlesKey: document.getElementById('openSubtitlesKey').value.trim(),
-        subdlKey: document.getElementById('subdlKey').value.trim(),
-        wyzieKey: document.getElementById('wyzieKey').value.trim()
+        subdlKey: document.getElementById('subdlKey').value.trim()
       };
-      
-      const jsonStr = JSON.stringify(payload);
-      const b64 = btoa(unescape(encodeURIComponent(jsonStr)));
-      return encodeURIComponent(b64);
+      return encodeURIComponent(btoa(unescape(encodeURIComponent(JSON.stringify(payload)))));
     }
 
     function installAddon() {
       const b64 = buildConfigString();
-      const host = window.location.host;
-      window.location.href = 'nuvio://' + host + '/' + b64 + '/manifest.json';
+      window.location.href = 'nuvio://' + window.location.host + '/' + b64 + '/manifest.json';
     }
 
     function copyManifestUrl() {
       const b64 = buildConfigString();
       const url = 'https://' + window.location.host + '/' + b64 + '/manifest.json';
       navigator.clipboard.writeText(url).then(() => {
-        alert('تم نسخ رابط الإضافة بنجاح! الصقه في خانة الملحقات في تطبيق Nuvio.');
+        alert('تم نسخ رابط الإضافة بنجاح!');
       }).catch(() => {
         prompt('انسخ الرابط يدوياً:', url);
       });
@@ -519,8 +379,7 @@ function renderHtml(config) {
 
 app.get(['/', '/configure', '/:config/configure'], (req, res) => {
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
-  const config = parseConfig(req);
-  res.send(renderHtml(config));
+  res.send(renderHtml(parseConfig(req)));
 });
 
 app.get(['/manifest.json', '/:config/manifest.json'], (req, res) => {
@@ -541,9 +400,7 @@ app.get([
   res.setHeader('Content-Type', 'application/json');
 
   let targetId = req.params.id || '';
-  if (targetId.endsWith('.json')) {
-    targetId = targetId.slice(0, -5);
-  }
+  if (targetId.endsWith('.json')) targetId = targetId.slice(0, -5);
 
   const type = req.params.type;
   const config = parseConfig(req);
@@ -554,12 +411,8 @@ app.get([
     const imdbId = media.imdbId;
     const season = media.season;
     const episode = media.episode;
-    let title = media.title;
+    let title = media.title || imdbId;
     const mediaType = media.type || type;
-
-    if (!title && imdbId) {
-      title = imdbId;
-    }
 
     const tasks = [
       getAnimeSubtitles(targetId, episode, config.jimakuKey, title).catch(() => [])
@@ -620,39 +473,29 @@ app.get([
 
     const sourceCounters = {};
 
-    const formatted = allSubs.map((s, idx) => {
+    const formatted = allSubs.map((s) => {
       let finalUrl = s.url;
       const ext = detectFormat(s);
-
       const rawSource = (s._source || '').toLowerCase();
       let siteName = 'Subtitles';
 
-      if (rawSource.includes('opensubtitles')) {
-        siteName = 'OpenSubtitles';
-      } else if (rawSource.includes('subdl')) {
-        siteName = 'SubDL';
-      } else if (rawSource.includes('subsource')) {
-        siteName = 'SubSource';
-      } else if (rawSource.includes('wyzie')) {
-        siteName = 'Wyzie';
-      } else if (rawSource.includes('animetosho') || rawSource.includes('anime')) {
-        siteName = 'AnimeTosho';
-      } else if (rawSource.includes('jimaku')) {
-        siteName = 'Jimaku';
-      } else if (s._source) {
-        siteName = s._source;
-      }
+      if (rawSource.includes('opensubtitles')) siteName = 'OpenSubtitles';
+      else if (rawSource.includes('subdl')) siteName = 'SubDL';
+      else if (rawSource.includes('subsource')) siteName = 'SubSource';
+      else if (rawSource.includes('wyzie')) siteName = 'Wyzie';
+      else if (rawSource.includes('animetosho') || rawSource.includes('anime')) siteName = 'AnimeTosho';
+      else if (rawSource.includes('jimaku')) siteName = 'Jimaku';
 
       const groupKey = `${siteName}-${ext}`;
       sourceCounters[groupKey] = (sourceCounters[groupKey] || 0) + 1;
       const count = sourceCounters[groupKey];
 
-      if (s._isZip) {
+      if (s._isZip || s.url.includes('.zip') || rawSource.includes('subdl')) {
         finalUrl = `${baseUrl}/stream-zip.srt?url=${encodeURIComponent(s.url)}&ep=${s._episode || episode || 1}`;
       } else if (s.url.startsWith('subsource://')) {
         finalUrl = `${baseUrl}/stream-subsource.srt?data=${encodeURIComponent(s.url)}`;
       } else if (rawSource.includes('opensubtitles') || s.url.includes('opensubtitles.com')) {
-        finalUrl = `${baseUrl}/stream-os.srt?url=${encodeURIComponent(s.url)}&key=${encodeURIComponent(config.openSubtitlesKey || '')}&format=${ext.toLowerCase()}`;
+        finalUrl = `${baseUrl}/stream-os.srt?url=${encodeURIComponent(s.url)}&format=${ext.toLowerCase()}`;
       }
 
       return {
@@ -677,11 +520,7 @@ app.get([
       if (seenUrls.has(s.url)) return false;
       seenUrls.add(s.url);
       return true;
-    }).map(s => ({
-      id: s.id,
-      url: s.url,
-      lang: s.lang
-    }));
+    });
 
     res.json({ subtitles: uniqueSubs });
   } catch (err) {
@@ -689,27 +528,21 @@ app.get([
   }
 });
 
-app.all(['/stream-os', '/stream-os.srt'], async (req, res) => {
+app.all(['/stream-os', '/stream-os.srt', '/api/stream-os', '/api/stream-os.srt'], async (req, res) => {
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   const subUrl = req.query.url;
-  const apiKey = req.query.key || '';
   const requestedFormat = req.query.format || 'srt';
 
   if (!subUrl) return res.status(400).send('Missing URL');
 
   try {
-    const headers = {
-      'User-Agent': 'NuvioSubtitles v1.0',
-      'Accept': '*/*'
-    };
-    if (apiKey) {
-      headers['Api-Key'] = apiKey;
-    }
-
     const response = await axios.get(subUrl, {
       responseType: 'arraybuffer',
       timeout: 10000,
-      headers
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept': '*/*'
+      }
     });
 
     let buffer = Buffer.from(response.data);
@@ -718,9 +551,7 @@ app.all(['/stream-os', '/stream-os.srt'], async (req, res) => {
       const zip = new AdmZip(buffer);
       const entries = zip.getEntries();
       const subEntry = entries.find(e => !e.isDirectory && (e.entryName.endsWith('.srt') || e.entryName.endsWith('.ass') || e.entryName.endsWith('.vtt')));
-      if (subEntry) {
-        buffer = subEntry.getData();
-      }
+      if (subEntry) buffer = subEntry.getData();
     }
 
     const fixedBuffer = fixArabicEncoding(buffer);
@@ -736,7 +567,7 @@ app.all(['/stream-os', '/stream-os.srt'], async (req, res) => {
   }
 });
 
-app.all(['/stream-zip', '/stream-zip.srt'], async (req, res) => {
+app.all(['/stream-zip', '/stream-zip.srt', '/api/stream-zip', '/api/stream-zip.srt'], async (req, res) => {
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   const zipUrl = req.query.url;
   const ep = req.query.ep || '1';
@@ -746,9 +577,11 @@ app.all(['/stream-zip', '/stream-zip.srt'], async (req, res) => {
   try {
     const response = await axios.get(zipUrl, {
       responseType: 'arraybuffer',
-      timeout: 10000,
+      timeout: 12000,
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Referer': 'https://subdl.com/',
+        'Accept': '*/*'
       }
     });
 
@@ -770,7 +603,7 @@ app.all(['/stream-zip', '/stream-zip.srt'], async (req, res) => {
   }
 });
 
-app.all(['/stream-subsource', '/stream-subsource.srt'], async (req, res) => {
+app.all(['/stream-subsource', '/stream-subsource.srt', '/api/stream-subsource', '/api/stream-subsource.srt'], async (req, res) => {
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   const dataUrl = req.query.data;
   if (!dataUrl) return res.status(400).send('Missing data');
