@@ -18,7 +18,7 @@ const PORT = process.env.PORT || 7000;
 
 const MANIFEST = {
   id: 'org.nuvio.aggregated.subtitles',
-  version: '24.2.0',
+  version: '25.0.0',
   name: 'Nuvio Multi-Source Subtitles',
   description: 'Arabic & Multi-language subtitles from OpenSubtitles, SubDL, SubSource & Anime',
   resources: ['subtitles'],
@@ -85,7 +85,8 @@ function parseConfig(req) {
 
 function getBaseUrl(req) {
   const host = req.headers['x-forwarded-host'] || req.headers.host;
-  return `https://${host}`;
+  const proto = req.headers['x-forwarded-proto'] || 'https';
+  return `${proto}://${host}`;
 }
 
 function findEpisodeInZip(zip, episode) {
@@ -481,7 +482,13 @@ app.get(['/manifest.json', '/:config/manifest.json'], (req, res) => {
   res.json(MANIFEST);
 });
 
-app.get(['/subtitles/:type/:id', '/:config/subtitles/:type/:id'], async (req, res) => {
+// مسار شامل يتقبل أي إضافات يرسلها التي في بدون أخطاء 404
+app.get([
+  '/subtitles/:type/:id', 
+  '/subtitles/:type/:id/:extra',
+  '/:config/subtitles/:type/:id',
+  '/:config/subtitles/:type/:id/:extra'
+], async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Headers', '*');
   res.setHeader('Content-Type', 'application/json');
@@ -545,12 +552,12 @@ app.get(['/subtitles/:type/:id', '/:config/subtitles/:type/:id'], async (req, re
     const formatted = allSubs.map((s, idx) => {
       let finalUrl = s.url;
 
+      // العودة لأسلوب الكود الأول السريع:
+      // فقط الملفات المحتاجة استخراج إجباري تمر بالسيرفر، والباقي روابط مباشرة وسريعة للتي في
       if (s._isZip) {
         finalUrl = `${baseUrl}/stream-zip.srt?url=${encodeURIComponent(s.url)}&ep=${s._episode || episode || 1}`;
       } else if (s.url.startsWith('subsource://')) {
         finalUrl = `${baseUrl}/stream-subsource.srt?data=${encodeURIComponent(s.url)}`;
-      } else {
-        finalUrl = `${baseUrl}/stream-sub.srt?url=${encodeURIComponent(s.url)}`;
       }
 
       return {
@@ -587,36 +594,6 @@ app.get(['/subtitles/:type/:id', '/:config/subtitles/:type/:id'], async (req, re
   }
 });
 
-const sendSubtitleResponse = (res, content, isAss) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Headers', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
-  res.setHeader('Content-Type', isAss ? 'text/x-ssa; charset=utf-8' : 'text/plain; charset=utf-8');
-  res.send(content);
-};
-
-app.all(['/stream-sub', '/stream-sub.srt'], async (req, res) => {
-  if (req.method === 'OPTIONS') return res.sendStatus(200);
-  const subUrl = req.query.url;
-  if (!subUrl) return res.status(400).send('Missing URL');
-
-  try {
-    const response = await axios.get(subUrl, {
-      responseType: 'arraybuffer',
-      timeout: 10000,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-      }
-    });
-
-    const content = fixArabicEncoding(Buffer.from(response.data));
-    const isAss = subUrl.toLowerCase().includes('.ass');
-    sendSubtitleResponse(res, content, isAss);
-  } catch (e) {
-    res.redirect(subUrl);
-  }
-});
-
 app.all(['/stream-zip', '/stream-zip.srt'], async (req, res) => {
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   const zipUrl = req.query.url;
@@ -641,7 +618,11 @@ app.all(['/stream-zip', '/stream-zip.srt'], async (req, res) => {
     const rawContent = entry.getData();
     const content = fixArabicEncoding(rawContent);
     const isAss = entry.entryName.toLowerCase().endsWith('.ass');
-    sendSubtitleResponse(res, content, isAss);
+
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Headers', '*');
+    res.setHeader('Content-Type', isAss ? 'text/x-ssa; charset=utf-8' : 'application/x-subrip; charset=utf-8');
+    res.send(content);
   } catch (e) {
     res.status(500).send('Error extracting ZIP');
   }
@@ -668,7 +649,11 @@ app.all(['/stream-subsource', '/stream-subsource.srt'], async (req, res) => {
     }
 
     finalBuffer = fixArabicEncoding(finalBuffer);
-    sendSubtitleResponse(res, finalBuffer, isAss);
+
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Headers', '*');
+    res.setHeader('Content-Type', isAss ? 'text/x-ssa; charset=utf-8' : 'application/x-subrip; charset=utf-8');
+    res.send(finalBuffer);
   } catch (e) {
     res.status(500).send('Error streaming SubSource');
   }
