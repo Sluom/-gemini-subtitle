@@ -5,8 +5,7 @@ function getHeaders(apiKey) {
   return {
     'X-API-Key': key,
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-    'Accept': '*/*',
-    'Content-Type': 'application/json'
+    'Accept': 'application/json'
   };
 }
 
@@ -29,21 +28,17 @@ async function getSubSource({ title, imdbId, season, episode, type, apiKey }, de
         const res = await axios.get(textUrl, { headers: getHeaders(activeKey), timeout: 7000 });
         const list = res.data?.data || res.data?.movies || [];
         if (list.length > 0) movie = list[0];
-      } catch (e) {
-        logs.textSearchError = e.response?.status || e.message;
-      }
+      } catch (e) {}
     }
 
-    // 2. البحث بـ IMDb
+    // 2. البحث بـ IMDb إذا لم يعثر عليه بالاسم
     if (!movie && imdbId && imdbId.startsWith('tt')) {
       try {
         const imdbUrl = `https://api.subsource.net/api/v1/movies/search?q=${imdbId}&searchType=imdb`;
         const res = await axios.get(imdbUrl, { headers: getHeaders(activeKey), timeout: 7000 });
         const list = res.data?.data || res.data?.movies || [];
         if (list.length > 0) movie = list[0];
-      } catch (e) {
-        logs.imdbSearchError = e.response?.status || e.message;
-      }
+      } catch (e) {}
     }
 
     if (!movie) {
@@ -64,16 +59,14 @@ async function getSubSource({ title, imdbId, season, episode, type, apiKey }, de
     );
 
     let list = getRes.data?.data || getRes.data?.subtitles || [];
-    logs.rawSubsFound = list.length;
     if (!list.length) return [];
 
-    // تصفية اللغات (عربي وإنكليزي)
+    // فلترة اللغات (عربي وإنكليزي)
     const validSubs = list.filter(item => {
       const l = (item.Language || item.language || item.lang || '').toLowerCase();
       return l.includes('arab') || l === 'ar' || l.includes('eng') || l === 'en';
     });
 
-    logs.validSubsFound = validSubs.length;
     list = validSubs.length > 0 ? validSubs : list;
 
     // تصفية أرقام الحلقات للمسلسلات
@@ -102,11 +95,10 @@ async function getSubSource({ title, imdbId, season, episode, type, apiKey }, de
       
       const relName = (Array.isArray(item.releaseInfo) ? item.releaseInfo[0] : '') || item.release_name || item.name || '';
       const isAss = relName.toLowerCase().endsWith('.ass');
-      const itemLink = item.link || '';
 
       return {
         id: `subsource_${subId}`,
-        url: `subsource://${subId}?key=${encodeURIComponent(activeKey)}&link=${encodeURIComponent(itemLink)}`,
+        url: `subsource://${subId}?key=${encodeURIComponent(activeKey)}`,
         lang: isArabic ? 'ara' : 'eng',
         format: isAss ? 'ass' : 'srt',
         _source: 'subsource',
@@ -115,10 +107,7 @@ async function getSubSource({ title, imdbId, season, episode, type, apiKey }, de
     });
 
     if (debugMode) {
-      let testDownload = null;
-      if (results.length > 0) {
-        testDownload = await fetchSubSourceBuffer(results[0].url, true);
-      }
+      const testDownload = results.length > 0 ? await fetchSubSourceBuffer(results[0].url, true) : null;
       return { success: true, logs, totalValid: results.length, sample: results[0] || null, testDownload };
     }
 
@@ -130,110 +119,32 @@ async function getSubSource({ title, imdbId, season, episode, type, apiKey }, de
 }
 
 async function fetchSubSourceBuffer(customUrl, debug = false) {
-  const attempts = [];
   try {
     const cleanUrl = customUrl.replace('subsource://', '');
     const [subIdPart, queryPart] = cleanUrl.split('?');
     const subId = subIdPart;
     const urlParams = new URLSearchParams(queryPart || '');
     const apiKey = urlParams.get('key') || process.env.SUBSOURCE_API_KEY || '';
-    const itemLink = urlParams.get('link') || '';
 
-    if (!subId) return debug ? { error: 'No subId provided' } : Buffer.from('');
+    if (!subId) return Buffer.from('');
 
-    const headers = getHeaders(apiKey);
+    const downloadUrl = `https://api.subsource.net/api/v1/subtitles/${subId}/download`;
+    const res = await axios.get(downloadUrl, {
+      headers: {
+        'X-API-Key': apiKey,
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      },
+      responseType: 'arraybuffer',
+      timeout: 10000
+    });
 
-    // دالة مساعدة لتنزيل الرابط أو قراءة البيانات
-    async function handleResponse(res, type) {
-      const buf = Buffer.from(res.data);
-      attempts.push({ type, status: res.status, byteLength: buf.length });
-
-      try {
-        const text = buf.toString('utf-8');
-        const json = JSON.parse(text);
-        let dlUrl = json.downloadUrl || json.data?.downloadUrl || json.url || json.data?.url || json.file;
-        if (dlUrl) {
-          if (dlUrl.startsWith('/')) dlUrl = `https://api.subsource.net${dlUrl}`;
-          const fileRes = await axios.get(dlUrl, { responseType: 'arraybuffer', timeout: 10000 });
-          return Buffer.from(fileRes.data);
-        }
-      } catch (e) {
-        if (buf.length > 0) return buf;
-      }
-      return null;
+    const buf = Buffer.from(res.data);
+    if (debug) {
+      return { success: true, bufferLength: buf.length, preview: buf.slice(0, 160).toString('utf-8') };
     }
-
-    // 1. فحص تفاصيل الترجمة (GET /api/v1/subtitles/:id)
-    try {
-      const res1 = await axios.get(`https://api.subsource.net/api/v1/subtitles/${subId}`, {
-        headers,
-        responseType: 'arraybuffer',
-        timeout: 8000
-      });
-      const data = await handleResponse(res1, `GET /subtitles/${subId}`);
-      if (data && data.length > 0) {
-        if (debug) return { success: true, attempts, bufferLength: data.length, preview: data.slice(0, 160).toString('utf-8') };
-        return data;
-      }
-    } catch (e1) {
-      attempts.push({ type: `GET /subtitles/${subId}`, error: e1.response?.status || e1.message });
-    }
-
-    // 2. فحص مسار التحميل المباشر (GET /api/v1/subtitles/:id/download)
-    try {
-      const res2 = await axios.get(`https://api.subsource.net/api/v1/subtitles/${subId}/download`, {
-        headers,
-        responseType: 'arraybuffer',
-        timeout: 8000
-      });
-      const data = await handleResponse(res2, `GET /subtitles/${subId}/download`);
-      if (data && data.length > 0) {
-        if (debug) return { success: true, attempts, bufferLength: data.length, preview: data.slice(0, 160).toString('utf-8') };
-        return data;
-      }
-    } catch (e2) {
-      attempts.push({ type: `GET /subtitles/${subId}/download`, error: e2.response?.status || e2.message });
-    }
-
-    // 3. فحص POST بمسار /api/v1/subtitles/:id/download
-    try {
-      const res3 = await axios.post(`https://api.subsource.net/api/v1/subtitles/${subId}/download`, {}, {
-        headers,
-        responseType: 'arraybuffer',
-        timeout: 8000
-      });
-      const data = await handleResponse(res3, `POST /subtitles/${subId}/download`);
-      if (data && data.length > 0) {
-        if (debug) return { success: true, attempts, bufferLength: data.length, preview: data.slice(0, 160).toString('utf-8') };
-        return data;
-      }
-    } catch (e3) {
-      attempts.push({ type: `POST /subtitles/${subId}/download`, error: e3.response?.status || e3.message });
-    }
-
-    // 4. إذا كان متوفر itemLink نجرب جلبه عبر API
-    if (itemLink) {
-      try {
-        const cleanLink = itemLink.startsWith('/') ? itemLink : `/${itemLink}`;
-        const res4 = await axios.get(`https://api.subsource.net/api/v1${cleanLink}`, {
-          headers,
-          responseType: 'arraybuffer',
-          timeout: 8000
-        });
-        const data = await handleResponse(res4, `GET /api/v1${cleanLink}`);
-        if (data && data.length > 0) {
-          if (debug) return { success: true, attempts, bufferLength: data.length, preview: data.slice(0, 160).toString('utf-8') };
-          return data;
-        }
-      } catch (e4) {
-        attempts.push({ type: `GET /api/v1${itemLink}`, error: e4.response?.status || e4.message });
-      }
-    }
-
-    if (debug) return { success: false, attempts, bufferLength: 0, preview: '' };
-    return Buffer.from('');
+    return buf;
   } catch (err) {
-    if (debug) return { error: err.message, attempts };
+    if (debug) return { error: err.message, bufferLength: 0 };
     return Buffer.from('');
   }
 }
