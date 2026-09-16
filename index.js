@@ -604,7 +604,8 @@ app.get([
       } else if (s.url.startsWith('subsource://')) {
         finalUrl = `${baseUrl}/stream-subsource.srt?data=${encodeURIComponent(s.url)}`;
       } else if (s.url.startsWith('os://')) {
-        finalUrl = `${baseUrl}/stream-os.srt?data=${encodeURIComponent(s.url)}&key=${encodeURIComponent(config.openSubtitlesKey || '')}`;
+        const isAssTrack = ext === 'ASS';
+        finalUrl = `${baseUrl}/stream-os.${isAssTrack ? 'ass' : 'srt'}?data=${encodeURIComponent(s.url)}&key=${encodeURIComponent(config.openSubtitlesKey || '')}`;
       }
 
       return {
@@ -638,7 +639,7 @@ app.get([
 });
 
 // مسار فك وتشغيل ترجمات OpenSubtitles الفردية عند الضغط عليها فقط
-app.all(['/stream-os', '/stream-os.srt'], async (req, res) => {
+app.all(['/stream-os', '/stream-os.srt', '/stream-os.ass'], async (req, res) => {
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   const dataUrl = req.query.data || '';
   const apiKey = req.query.key || '';
@@ -648,7 +649,7 @@ app.all(['/stream-os', '/stream-os.srt'], async (req, res) => {
   try {
     const parsed = new URL(dataUrl.replace('os://', 'http://dummy.com/'));
     const fileId = parseInt(parsed.pathname.replace('/', ''), 10);
-    const formatParam = parsed.searchParams.get('format') || 'srt';
+    const formatParam = (parsed.searchParams.get('format') || 'srt').toLowerCase();
 
     if (!fileId || !apiKey) return res.status(400).send('Missing fileId or apiKey');
 
@@ -683,17 +684,34 @@ app.all(['/stream-os', '/stream-os.srt'], async (req, res) => {
     if (buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4b) {
       const zip = new AdmZip(buffer);
       const entries = zip.getEntries();
-      const subEntry = entries.find(e => !e.isDirectory && (e.entryName.endsWith('.srt') || e.entryName.endsWith('.ass') || e.entryName.endsWith('.vtt')));
-      if (subEntry) buffer = subEntry.getData();
+      const assEntry = entries.find(e => !e.isDirectory && (e.entryName.toLowerCase().endsWith('.ass') || e.entryName.toLowerCase().endsWith('.ssa')));
+      const anySubEntry = entries.find(e => !e.isDirectory && (e.entryName.toLowerCase().endsWith('.srt') || e.entryName.toLowerCase().endsWith('.vtt')));
+      
+      if (assEntry) {
+        buffer = assEntry.getData();
+      } else if (anySubEntry) {
+        buffer = anySubEntry.getData();
+      }
     }
 
     const fixedBuffer = fixArabicEncoding(buffer);
-    const contentCheck = fixedBuffer.slice(0, 300).toString('utf-8');
-    const isAss = formatParam === 'ass' || contentCheck.includes('[Script Info]');
+    const contentCheck = fixedBuffer.slice(0, 500).toString('utf-8');
+    const isActuallyAss = formatParam === 'ass' || 
+                          formatParam === 'ssa' || 
+                          contentCheck.includes('[Script Info]') || 
+                          contentCheck.includes('V4+ Styles');
 
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', '*');
-    res.setHeader('Content-Type', isAss ? 'text/x-ssa; charset=utf-8' : 'application/x-subrip; charset=utf-8');
+
+    if (isActuallyAss) {
+      res.setHeader('Content-Type', 'text/x-ssa; charset=utf-8');
+      res.setHeader('Content-Disposition', 'inline; filename="subtitle.ass"');
+    } else {
+      res.setHeader('Content-Type', 'application/x-subrip; charset=utf-8');
+      res.setHeader('Content-Disposition', 'inline; filename="subtitle.srt"');
+    }
+
     res.send(fixedBuffer);
   } catch (e) {
     res.status(500).send('Error streaming OpenSubtitles');
