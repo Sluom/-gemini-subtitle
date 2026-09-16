@@ -598,13 +598,13 @@ app.get([
       const count = sourceCounters[groupKey];
 
       const isActuallyZip = s._isZip === true || s.url.toLowerCase().endsWith('.zip');
+      const isAssTrack = ext === 'ASS';
 
       if (isActuallyZip) {
-        finalUrl = `${baseUrl}/stream-zip.srt?url=${encodeURIComponent(s.url)}&ep=${s._episode || episode || 1}`;
+        finalUrl = `${baseUrl}/stream-zip.${isAssTrack ? 'ass' : 'srt'}?url=${encodeURIComponent(s.url)}&ep=${s._episode || episode || 1}`;
       } else if (s.url.startsWith('subsource://')) {
-        finalUrl = `${baseUrl}/stream-subsource.srt?data=${encodeURIComponent(s.url)}`;
+        finalUrl = `${baseUrl}/stream-subsource.${isAssTrack ? 'ass' : 'srt'}?data=${encodeURIComponent(s.url)}`;
       } else if (s.url.startsWith('os://')) {
-        const isAssTrack = ext === 'ASS';
         finalUrl = `${baseUrl}/stream-os.${isAssTrack ? 'ass' : 'srt'}?data=${encodeURIComponent(s.url)}&key=${encodeURIComponent(config.openSubtitlesKey || '')}`;
       }
 
@@ -718,7 +718,7 @@ app.all(['/stream-os', '/stream-os.srt', '/stream-os.ass'], async (req, res) => 
   }
 });
 
-app.all(['/stream-zip', '/stream-zip.srt'], async (req, res) => {
+app.all(['/stream-zip', '/stream-zip.srt', '/stream-zip.ass'], async (req, res) => {
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   const zipUrl = req.query.url;
   const ep = req.query.ep || '1';
@@ -741,18 +741,26 @@ app.all(['/stream-zip', '/stream-zip.srt'], async (req, res) => {
 
     const rawContent = entry.getData();
     const content = fixArabicEncoding(rawContent);
-    const isAss = entry.entryName.toLowerCase().endsWith('.ass');
+    const isAss = entry.entryName.toLowerCase().endsWith('.ass') || entry.entryName.toLowerCase().endsWith('.ssa');
 
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', '*');
-    res.setHeader('Content-Type', isAss ? 'text/x-ssa; charset=utf-8' : 'application/x-subrip; charset=utf-8');
+
+    if (isAss) {
+      res.setHeader('Content-Type', 'text/x-ssa; charset=utf-8');
+      res.setHeader('Content-Disposition', 'inline; filename="subtitle.ass"');
+    } else {
+      res.setHeader('Content-Type', 'application/x-subrip; charset=utf-8');
+      res.setHeader('Content-Disposition', 'inline; filename="subtitle.srt"');
+    }
+
     res.send(content);
   } catch (e) {
     res.status(500).send('Error extracting ZIP');
   }
 });
 
-app.all(['/stream-subsource', '/stream-subsource.srt'], async (req, res) => {
+app.all(['/stream-subsource', '/stream-subsource.srt', '/stream-subsource.ass'], async (req, res) => {
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   const dataUrl = req.query.data;
   if (!dataUrl) return res.status(400).send('Missing data');
@@ -779,7 +787,15 @@ app.all(['/stream-subsource', '/stream-subsource.srt'], async (req, res) => {
 
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', '*');
-    res.setHeader('Content-Type', isAss ? 'text/x-ssa; charset=utf-8' : 'application/x-subrip; charset=utf-8');
+
+    if (isAss) {
+      res.setHeader('Content-Type', 'text/x-ssa; charset=utf-8');
+      res.setHeader('Content-Disposition', 'inline; filename="subtitle.ass"');
+    } else {
+      res.setHeader('Content-Type', 'application/x-subrip; charset=utf-8');
+      res.setHeader('Content-Disposition', 'inline; filename="subtitle.srt"');
+    }
+
     res.send(finalBuffer);
   } catch (e) {
     res.status(500).send('Error streaming SubSource');
