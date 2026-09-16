@@ -2,7 +2,7 @@ const axios = require('axios');
 
 function getAnimeHeaders() {
   return {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
     'Accept': 'application/json'
   };
 }
@@ -10,7 +10,7 @@ function getAnimeHeaders() {
 async function searchKitsuIdByTitle(title) {
   if (!title) return null;
   try {
-    const cleanTitle = title.replace(/\([^)]*\)/g, '').trim();
+    const cleanTitle = title.replace(/\([^)]*\)/g, '').replace(/season \d+/i, '').trim();
     const res = await axios.get(`https://kitsu.io/api/edge/anime?filter[text]=${encodeURIComponent(cleanTitle)}&page[limit]=1`, {
       headers: getAnimeHeaders(),
       timeout: 6000
@@ -62,13 +62,14 @@ async function getJimakuSubtitles(query, apiKey) {
     return files.map((file, idx) => {
       const fileName = (file.name || '').toLowerCase();
       const isAss = fileName.endsWith('.ass');
+      const isArabic = fileName.includes('ar') || fileName.includes('ara') || fileName.includes('arabic');
       return {
         id: `jimaku_${file.id || idx}`,
         url: file.url || file.download_url,
-        lang: 'ara',
+        lang: isArabic ? 'ara' : 'jpn',
         format: isAss ? 'ass' : 'srt',
         _source: 'jimaku',
-        _priority: 3
+        _priority: isArabic ? 1 : 3
       };
     }).filter(f => f.url);
   } catch (e) {
@@ -88,26 +89,25 @@ async function getAnimeToshoSubtitles(kitsuId, episode) {
     const items = res.data || [];
     const subs = [];
 
-    // مطابقة رقم الحلقة بمختلف الصيغ (E01, Ep 01, - 01, [01])
     const epRegex = new RegExp(`(?:e|ep|episode|[._ -]|\\[|\\()0*${epNum}(?:[\\]\\)\\s._-]|$|v\\d+)`, 'i');
 
     for (const item of items) {
       const title = (item.title || '').toLowerCase();
       
-      if (epRegex.test(title) && item.attachments && item.attachments.length) {
+      if (epRegex.test(title) && Array.isArray(item.attachments) && item.attachments.length) {
         for (const att of item.attachments) {
           const attName = (att.filename || '').toLowerCase();
-          if (attName.endsWith('.ass') || attName.endsWith('.srt')) {
+          if (attName.endsWith('.ass') || attName.endsWith('.srt') || attName.endsWith('.vtt')) {
             const isAss = attName.endsWith('.ass');
-            const isArabic = attName.includes('ara') || attName.includes('arabic');
+            const isArabic = attName.includes('ara') || attName.includes('arabic') || attName.includes('ar.');
             
             subs.push({
               id: `tosho_${att.id || Math.random().toString(36).substring(7)}`,
               url: att.url,
-              lang: isArabic ? 'ara' : 'jpn',
+              lang: isArabic ? 'ara' : 'eng',
               format: isAss ? 'ass' : 'srt',
               _source: 'animetosho',
-              _priority: 3
+              _priority: isArabic ? 1 : 3
             });
           }
         }
@@ -122,7 +122,6 @@ async function getAnimeToshoSubtitles(kitsuId, episode) {
 async function getAnimeSubtitles(targetId, episodeNum = 1, jimakuKey = '', mediaTitle = '') {
   if (!targetId && !mediaTitle) return [];
 
-  // دعم الاستدعاء كـ Object أو كمتغيرات عادية
   let target = targetId;
   let episode = episodeNum;
   let key = jimakuKey;
