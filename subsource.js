@@ -5,7 +5,7 @@ function getHeaders(apiKey) {
   return {
     'X-API-Key': key,
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-    'Accept': 'application/json',
+    'Accept': '*/*',
     'Content-Type': 'application/json'
   };
 }
@@ -67,7 +67,7 @@ async function getSubSource({ title, imdbId, season, episode, type, apiKey }, de
     logs.rawSubsFound = list.length;
     if (!list.length) return [];
 
-    // قراءة الحقل بدقة سواء كان Language أو language أو lang
+    // فلترة اللغات (عربي وإنكليزي)
     const validSubs = list.filter(item => {
       const l = (item.Language || item.language || item.lang || '').toLowerCase();
       return l.includes('arab') || l === 'ar' || l.includes('eng') || l === 'en';
@@ -76,7 +76,7 @@ async function getSubSource({ title, imdbId, season, episode, type, apiKey }, de
     logs.validSubsFound = validSubs.length;
     list = validSubs.length > 0 ? validSubs : list;
 
-    // تصفية الحلقات للمسلسلات
+    // تصفية أرقام الحلقات للمسلسلات
     if (season && episode) {
       const sNum = parseInt(season, 10);
       const eNum = parseInt(episode, 10);
@@ -113,21 +113,10 @@ async function getSubSource({ title, imdbId, season, episode, type, apiKey }, de
       };
     });
 
-    // في وضع الفحص: نجري محاولة تحميل حية لأول ترجمة للتأكد من احتوائها على نصوص
     if (debugMode) {
       let testDownload = null;
       if (results.length > 0) {
-        try {
-          const testBuf = await fetchSubSourceBuffer(results[0].url);
-          testDownload = {
-            testedSubId: results[0].id,
-            bufferLength: testBuf ? testBuf.length : 0,
-            hasContent: testBuf && testBuf.length > 0,
-            preview: testBuf ? testBuf.slice(0, 160).toString('utf-8') : 'empty'
-          };
-        } catch (err) {
-          testDownload = { error: err.message };
-        }
+        testDownload = await fetchSubSourceBuffer(results[0].url, true);
       }
       return { success: true, logs, totalValid: results.length, sample: results[0] || null, testDownload };
     }
@@ -139,7 +128,8 @@ async function getSubSource({ title, imdbId, season, episode, type, apiKey }, de
   }
 }
 
-async function fetchSubSourceBuffer(customUrl) {
+async function fetchSubSourceBuffer(customUrl, debug = false) {
+  const attempts = [];
   try {
     const cleanUrl = customUrl.replace('subsource://', '');
     const [subIdPart, queryPart] = cleanUrl.split('?');
@@ -147,57 +137,98 @@ async function fetchSubSourceBuffer(customUrl) {
     const urlParams = new URLSearchParams(queryPart || '');
     const apiKey = urlParams.get('key') || process.env.SUBSOURCE_API_KEY || '';
 
-    if (!subId) return Buffer.from('');
+    if (!subId) return debug ? { error: 'No subId provided' } : Buffer.from('');
 
-    const headers = {
-      'X-API-Key': apiKey,
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-      'Accept': '*/*',
-      'Content-Type': 'application/json'
-    };
+    const headers = getHeaders(apiKey);
 
-    // المحاولة 1: POST الرسمي إلى /api/v1/subtitles/download
+    // المحاولة 1: POST الرسمي مع قراءة استجابة خام (ArrayBuffer)
     try {
       const res = await axios.post(
         'https://api.subsource.net/api/v1/subtitles/download',
         { subId: subId, subtitleId: subId },
-        { headers, timeout: 10000 }
+        { headers, responseType: 'arraybuffer', timeout: 10000 }
       );
 
-      let downloadUrl = res.data?.downloadUrl || res.data?.data?.downloadUrl || res.data?.url || res.data?.data?.url;
-      
-      if (downloadUrl) {
-        if (downloadUrl.startsWith('/')) {
-          downloadUrl = `https://api.subsource.net${downloadUrl}`;
-        }
-        const fileRes = await axios.get(downloadUrl, {
-          responseType: 'arraybuffer',
-          timeout: 10000,
-          headers: { 'User-Agent': 'Mozilla/5.0' }
-        });
-        if (fileRes.data && fileRes.data.byteLength > 0) {
-          return Buffer.from(fileRes.data);
-        }
-      }
-      
-      if (Buffer.isBuffer(res.data) && res.data.length > 0) {
-        return res.data;
-      }
-    } catch (e1) {}
+      const buf = Buffer.from(res.data);
+      attempts.push({ type: 'POST /download', status: res.status, byteLength: buf.length });
 
-    // المحاولة 2: GET المباشر إلى /api/v1/subtitles/download/:id
+      // فحص هل الرد JSON يحتوي رابط خارجي أم هو الملف المباشر
+      try {
+        const text = buf.toString('utf-8');
+        const json = JSON.parse(text);
+        let dlUrl = json.downloadUrl || json.data?.downloadUrl || json.url || json.data?.url;
+        if (dlUrl) {
+          if (dlUrl.startsWith('/')) dlUrl = `https://api.subsource.net${dlUrl}`;
+          const fileRes = await axios.get(dlUrl, { responseType: 'arraybuffer', timeout: 10000 });
+          const finalBuf = Buffer.from(fileRes.data);
+          if (debug) return { success: true, attempts, bufferLength: finalBuf.length, preview: finalBuf.slice(0, 160).toString('utf-8') };
+          return finalBuf;
+        }
+      } catch (notJson) {
+        // الرد هو ملف الترجمة المباشر
+        if (buf.length > 0) {
+          if (debug) return { success: true, attempts, bufferLength: buf.length, preview: buf.slice(0, 160).toString('utf-8') };
+          return buf;
+        }
+      }
+    } catch (e1) {
+      attempts.push({ type: 'POST /download', error: e1.response?.status || e1.message });
+    }
+
+    // المحاولة 2: إرسال subId كرقم
     try {
-      const res2 = await axios.get(
+      const numId = parseInt(subId, 10);
+      if (!isNaN(numId)) {
+        const resNum = await axios.post(
+          'https://api.subsource.net/api/v1/subtitles/download',
+          { subId: numId },
+          { headers, responseType: 'arraybuffer', timeout: 10000 }
+        );
+        const buf = Buffer.from(resNum.data);
+        attempts.push({ type: 'POST /download (numeric)', status: resNum.status, byteLength: buf.length });
+
+        try {
+          const text = buf.toString('utf-8');
+          const json = JSON.parse(text);
+          let dlUrl = json.downloadUrl || json.data?.downloadUrl || json.url || json.data?.url;
+          if (dlUrl) {
+            if (dlUrl.startsWith('/')) dlUrl = `https://api.subsource.net${dlUrl}`;
+            const fileRes = await axios.get(dlUrl, { responseType: 'arraybuffer', timeout: 10000 });
+            const finalBuf = Buffer.from(fileRes.data);
+            if (debug) return { success: true, attempts, bufferLength: finalBuf.length, preview: finalBuf.slice(0, 160).toString('utf-8') };
+            return finalBuf;
+          }
+        } catch (e) {
+          if (buf.length > 0) {
+            if (debug) return { success: true, attempts, bufferLength: buf.length, preview: buf.slice(0, 160).toString('utf-8') };
+            return buf;
+          }
+        }
+      }
+    } catch (e2) {
+      attempts.push({ type: 'POST /download (numeric)', error: e2.response?.status || e2.message });
+    }
+
+    // المحاولة 3: مسار GET المباشر
+    try {
+      const res3 = await axios.get(
         `https://api.subsource.net/api/v1/subtitles/download/${subId}`,
         { headers, responseType: 'arraybuffer', timeout: 10000 }
       );
-      if (res2.data && res2.data.byteLength > 0) {
-        return Buffer.from(res2.data);
+      const buf3 = Buffer.from(res3.data);
+      attempts.push({ type: 'GET /download/:id', status: res3.status, byteLength: buf3.length });
+      if (buf3.length > 0) {
+        if (debug) return { success: true, attempts, bufferLength: buf3.length, preview: buf3.slice(0, 160).toString('utf-8') };
+        return buf3;
       }
-    } catch (e2) {}
+    } catch (e3) {
+      attempts.push({ type: 'GET /download/:id', error: e3.response?.status || e3.message });
+    }
 
+    if (debug) return { success: false, attempts, bufferLength: 0, preview: '' };
     return Buffer.from('');
   } catch (err) {
+    if (debug) return { error: err.message, attempts };
     return Buffer.from('');
   }
 }
