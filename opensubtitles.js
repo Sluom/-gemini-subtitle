@@ -22,13 +22,20 @@ async function fetchOpenSubtitlesMirror(imdbId, season, episode, type) {
     );
 
     const subs = res.data?.subtitles || [];
-    return subs.map(s => ({
-      url: s.url,
-      lang: (s.lang || 'ara').toLowerCase().startsWith('ar') ? 'ara' : 'eng',
-      origName: s.title || s.name || 'OpenSubtitles Mirror',
-      _source: 'opensubtitles-mirror',
-      _priority: 2
-    }));
+    return subs.map(s => {
+      const isArabic = (s.lang || 'ara').toLowerCase().startsWith('ar');
+      const isAss = (s.url || '').toLowerCase().includes('.ass') || (s.title || '').toLowerCase().includes('.ass');
+
+      return {
+        url: s.url,
+        lang: isArabic ? 'ara' : 'eng',
+        format: isAss ? 'ass' : 'srt',
+        fileName: s.title || s.name || '',
+        origName: s.title || s.name || 'OpenSubtitles Mirror',
+        _source: 'opensubtitles-mirror',
+        _priority: isArabic ? (isAss ? 0 : 2) : 3
+      };
+    });
   } catch (e) {
     return [];
   }
@@ -56,13 +63,18 @@ async function fetchOpenSubtitlesOfficial(imdbId, season, episode, apiKey) {
       const file = (attr.files && attr.files[0]) || {};
       const lang = (attr.language || 'ara').toLowerCase();
       const isAr = lang.startsWith('ar');
+      
+      const realFileName = file.file_name || attr.release || '';
+      const isAss = realFileName.toLowerCase().endsWith('.ass') || (attr.format || '').toLowerCase() === 'ass';
 
       return {
         url: file.file_id ? `https://api.opensubtitles.com/api/v1/download/${file.file_id}` : attr.url,
         lang: isAr ? 'ara' : 'eng',
-        origName: attr.release || 'OpenSubtitles Official',
+        format: isAss ? 'ass' : 'srt',
+        fileName: realFileName,
+        origName: realFileName || 'OpenSubtitles Official',
         _source: 'opensubtitles-api',
-        _priority: 2
+        _priority: isAr ? (isAss ? 0 : 1) : 3
       };
     }).filter(s => s.url);
   } catch (e) {
