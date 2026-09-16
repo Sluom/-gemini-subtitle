@@ -14,26 +14,29 @@ function getAxiosConfig(apiKey) {
   return { headers, timeout: TIMEOUT };
 }
 
-// فحص دقيق وشامل لصيغة ASS من بيانات الملف والإصدار
+// فحص دقيق وشامل لصيغ SSA و ASS
 function checkIsAss(file, attr) {
   const fileName = (file?.file_name || '').toLowerCase();
   const release = (attr?.release || '').toLowerCase();
-  const format = (attr?.format || '').toLowerCase();
+  const format = (attr?.format || file?.format || '').toLowerCase();
+  const subFormat = (attr?.sub_format || file?.sub_format || '').toLowerCase();
 
   return (
     format === 'ass' ||
     format === 'ssa' ||
+    subFormat === 'ass' ||
+    subFormat === 'ssa' ||
     fileName.endsWith('.ass') ||
     fileName.endsWith('.ssa') ||
     fileName.includes('.ass') ||
     fileName.includes('.ssa') ||
     release.includes('.ass') ||
     release.includes('.ssa') ||
-    release.includes('[ass]')
+    release.includes('[ass]') ||
+    release.includes('[ssa]')
   );
 }
 
-// دالة تنفيذ طلب البحث في الـ API الرسمي
 async function searchOpenSubtitlesApi(paramsObj, apiKey) {
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(paramsObj)) {
@@ -47,11 +50,10 @@ async function searchOpenSubtitlesApi(paramsObj, apiKey) {
   return Array.isArray(res.data?.data) ? res.data.data : [];
 }
 
-// السحب عبر الـ API الرسمي بالمفتاح الخاص بك
+// 1. السحب عبر الـ API الرسمي
 async function fetchOfficial(imdbId, season, episode, type, apiKey) {
   if (!apiKey || !imdbId || !imdbId.startsWith('tt')) return [];
 
-  // إزالة الأحرف tt والأصفار الزائدة لتسريع المطابقة بحسب معايير الموقع
   const cleanNumericId = imdbId.replace(/^tt/, '').replace(/^0+/, '');
   const isSeries = type === 'series' || season != null;
 
@@ -59,7 +61,6 @@ async function fetchOfficial(imdbId, season, episode, type, apiKey) {
 
   try {
     if (isSeries && season != null && episode != null) {
-      // للمسلسلات: الموقع يشترط parent_imdb_id لرقم المسلسل مع رقم الموسم والحلقة
       items = await searchOpenSubtitlesApi({
         parent_imdb_id: cleanNumericId,
         season_number: season,
@@ -67,7 +68,6 @@ async function fetchOfficial(imdbId, season, episode, type, apiKey) {
         languages: 'ar'
       }, apiKey);
 
-      // فحص احتياطي برقم الـ imdb_id المباشر في حال كان المعرف خاصاً بالحلقة نفسها
       if (!items.length) {
         items = await searchOpenSubtitlesApi({
           imdb_id: cleanNumericId,
@@ -77,7 +77,6 @@ async function fetchOfficial(imdbId, season, episode, type, apiKey) {
         }, apiKey);
       }
     } else {
-      // للأفلام السينمائية
       items = await searchOpenSubtitlesApi({
         imdb_id: cleanNumericId,
         languages: 'ar'
@@ -104,6 +103,7 @@ async function fetchOfficial(imdbId, season, episode, type, apiKey) {
         lang: 'ara',
         format: format,
         ext: format,
+        subFormat: isAss ? 'ssa' : 'srt',
         fileName: rawName,
         origName: rawName,
         _source: 'opensubtitles',
@@ -115,7 +115,7 @@ async function fetchOfficial(imdbId, season, episode, type, apiKey) {
   return results;
 }
 
-// السحب الاحتياطي عبر سيرفر Stremio في حال توقف الـ API أو عدم توفر مفتاح
+// 2. السحب عبر سيرفر Stremio (سيرفر SubSense الأساسي لصيد الـ SSA)
 async function fetchMirror(imdbId, season, episode, type) {
   if (!imdbId || !imdbId.startsWith('tt')) return [];
 
@@ -125,7 +125,7 @@ async function fetchMirror(imdbId, season, episode, type) {
     const targetId = isSeries && season ? `${imdbId}:${season}:${episode || 1}` : imdbId;
 
     const url = `https://opensubtitles-v3.strem.io/subtitles/${mediaType}/${targetId}.json`;
-    const res = await axios.get(url, { headers: { 'User-Agent': USER_AGENT }, timeout: 6000 });
+    const res = await axios.get(url, { headers: { 'User-Agent': USER_AGENT }, timeout: 7000 });
     const list = res.data?.subtitles || [];
 
     return list
@@ -136,7 +136,16 @@ async function fetchMirror(imdbId, season, episode, type) {
       .map(s => {
         const rawUrl = (s.url || '').toLowerCase();
         const rawName = (s.SubFileName || s.title || s.name || '').toLowerCase();
-        const isAss = rawUrl.includes('.ass') || rawName.includes('.ass');
+        const subFormat = (s.SubFormat || s.format || s.subFormat || '').toLowerCase();
+
+        // صيد صيغة SSA المعتمدة بسيرفر OpenSubtitles
+        const isAss = subFormat === 'ssa' ||
+                      subFormat === 'ass' ||
+                      rawUrl.includes('.ass') ||
+                      rawUrl.includes('.ssa') ||
+                      rawName.includes('.ass') ||
+                      rawName.includes('.ssa');
+
         const format = isAss ? 'ass' : 'srt';
 
         return {
@@ -144,6 +153,8 @@ async function fetchMirror(imdbId, season, episode, type) {
           lang: 'ara',
           format: format,
           ext: format,
+          subFormat: isAss ? 'ssa' : 'srt',
+          SubFormat: isAss ? 'ssa' : 'srt',
           fileName: s.SubFileName || s.title || s.name || 'OpenSubtitles Mirror',
           origName: s.SubFileName || s.title || s.name || 'OpenSubtitles Mirror',
           _source: 'opensubtitles',
