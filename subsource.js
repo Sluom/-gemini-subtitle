@@ -1,181 +1,70 @@
 const axios = require('axios');
 
-function getHeaders(apiKey) {
+function getConfigPath(apiKey) {
+  const defaultPath = 'c2tfNTJkNzQ5NGZiYzdmYWE0ZDYwY2I2NTIwYzNlMWNjNzAzYzBjNTFkNjcyNzJmNjE4MWEzNGU2MDYxNTI1Y2EyMi9hcmFiaWMvaGlJbmNsdWRlL3R5cGU6MC8';
   const key = apiKey || process.env.SUBSOURCE_API_KEY || '';
-  return {
-    'X-API-Key': key,
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-    'Accept': 'application/json'
-  };
-}
 
-function pickBestMovie(list, cleanTitle, sNum) {
-  if (!list || !list.length) return null;
+  if (!key) return defaultPath;
 
-  const normClean = cleanTitle.toLowerCase().replace(/[^a-z0-9]/g, '');
-
-  if (sNum) {
-    const seasonRegex = new RegExp(`(?:season|s)[._ -]*0*${sNum}\\b`, 'i');
-    const seasonMatch = list.find(m => seasonRegex.test(m.title || m.name || ''));
-    if (seasonMatch) return seasonMatch;
+  if (key.startsWith('c2tf') || (key.length > 50 && !key.startsWith('sk_'))) {
+    return key;
   }
 
-  const exactMatch = list.find(m => {
-    const t = (m.title || m.name || '').replace(/\([^)]*\)/g, '').toLowerCase().replace(/[^a-z0-9]/g, '');
-    return t === normClean;
-  });
-  if (exactMatch) return exactMatch;
-
-  const startMatch = list.find(m => {
-    const words = (m.title || m.name || '').toLowerCase().split(/[^a-z0-9]+/);
-    return words[0] === cleanTitle.toLowerCase().split(/[^a-z0-9]+/)[0];
-  });
-  if (startMatch) return startMatch;
-
-  return list[0];
+  try {
+    return Buffer.from(`${key}/arabic/hiInclude/type:0/`).toString('base64');
+  } catch (e) {
+    return defaultPath;
+  }
 }
 
 async function getSubSource({ title, imdbId, season, episode, type, apiKey }, debugMode = false) {
   const activeKey = apiKey || process.env.SUBSOURCE_API_KEY || '';
-  const logs = { apiKeyReceived: !!activeKey, imdbId, title, season, episode };
-  if (!activeKey) {
-    if (debugMode) return { error: 'SubSource API Key is MISSING', logs };
+  const logs = { apiKeyReceived: !!activeKey, imdbId, title, season, episode, type };
+
+  if (!imdbId || !imdbId.startsWith('tt')) {
+    if (debugMode) return { error: 'Valid IMDb ID is required', logs };
     return [];
   }
 
   try {
-    let movie = null;
-    let cleanTitle = (title || '').replace(/\([^)]*\)/g, '').trim();
-    const sNum = season ? parseInt(season, 10) : null;
-    const eNum = episode ? parseInt(episode, 10) : null;
-
-    if (imdbId && imdbId.startsWith('tt')) {
-      try {
-        const imdbUrl = `https://api.subsource.net/api/v1/movies/search?q=${imdbId}&searchType=imdb`;
-        const res = await axios.get(imdbUrl, { headers: getHeaders(activeKey), timeout: 7000 });
-        const list = res.data?.data || res.data?.movies || [];
-        if (list.length > 0) {
-          movie = sNum ? pickBestMovie(list, cleanTitle, sNum) : list[0];
-        }
-      } catch (e) {
-        logs.imdbSearchError = e.response?.status || e.message;
-      }
+    const configPath = getConfigPath(activeKey);
+    const isSeries = type === 'series' || !!season;
+    
+    let targetId = imdbId;
+    if (isSeries && season) {
+      targetId = `${imdbId}:${season}:${episode || 1}`;
     }
 
-    if (!movie && cleanTitle && !cleanTitle.startsWith('tt')) {
-      try {
-        const textUrl = `https://api.subsource.net/api/v1/movies/search?q=${encodeURIComponent(cleanTitle)}&searchType=text`;
-        const res = await axios.get(textUrl, { headers: getHeaders(activeKey), timeout: 7000 });
-        const list = res.data?.data || res.data?.movies || [];
-        if (list.length > 0) {
-          movie = pickBestMovie(list, cleanTitle, sNum);
-        }
-      } catch (e) {
-        logs.textSearchError = e.response?.status || e.message;
-      }
-    }
+    const endpointType = isSeries ? 'series' : 'movie';
+    const requestUrl = `https://subsource.strem.top/${configPath}/subtitles/${endpointType}/${targetId}.json`;
+    logs.requestUrl = requestUrl;
 
-    if (!movie) {
-      if (debugMode) return { error: 'Movie not found on SubSource', logs };
+    const res = await axios.get(requestUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'application/json'
+      },
+      timeout: 9000
+    });
+
+    const list = res.data?.subtitles || [];
+    logs.rawSubsFound = list.length;
+
+    if (!Array.isArray(list) || list.length === 0) {
+      if (debugMode) return { error: 'No subtitles returned from service', logs };
       return [];
     }
 
-    const movieId = movie.movieId || movie.id;
-    logs.foundMovie = movie.title;
-    logs.movieId = movieId;
-
-    if (!movieId) return [];
-
-    const getRes = await axios.get(
-      `https://api.subsource.net/api/v1/subtitles?movieId=${movieId}&limit=100`,
-      { headers: getHeaders(activeKey), timeout: 8000 }
-    );
-
-    let list = getRes.data?.data || getRes.data?.subtitles || [];
-    logs.rawSubsFound = list.length;
-    if (!list.length) return [];
-
-    list = list.filter(item => {
-      const l = (item.Language || item.language || item.lang || '').toLowerCase();
-      return l.includes('arab') || l === 'ar' || l.includes('eng') || l === 'en';
-    });
-
-    if (!list.length) return [];
-
-    if (sNum && eNum) {
-      const sPattern = `0*${sNum}`;
-      const ePattern = `0*${eNum}`;
-
-      const strictEpPatterns = [
-        new RegExp(`(?:s|season[._ -]*)${sPattern}[._ -]*(?:e|ep|episode)[._ -]*${ePattern}(?:[^0-9]|$)`, 'i'),
-        new RegExp(`\\b${sPattern}x${ePattern}\\b`, 'i'),
-        new RegExp(`\\[${sPattern}[._ -]*[xe][._ -]*${ePattern}\\]`, 'i')
-      ];
-
-      const seasonPackRegex = new RegExp(`(?:s|season[._ -]*)${sPattern}\\b.*(?:complete|full|pack|batch|all)`, 'i');
-      const otherSeasonRegex = new RegExp(`(?:s|season[._ -]*)(?!0*${sNum}\\b)[0-9]+`, 'i');
-
-      list = list.filter(item => {
-        const itemS = item.season != null && item.season !== '' ? parseInt(item.season, 10) : null;
-        const itemE = item.episode != null && item.episode !== '' ? parseInt(item.episode, 10) : null;
-
-        if (itemS !== null && itemE !== null && !isNaN(itemS) && !isNaN(itemE)) {
-          return itemS === sNum && itemE === eNum;
-        }
-
-        if (itemS !== null && !isNaN(itemS) && itemS === sNum && (itemE === null || isNaN(itemE))) {
-          return true;
-        }
-
-        const names = [
-          ...(Array.isArray(item.releaseInfo) ? item.releaseInfo : [item.releaseInfo]),
-          item.release_name,
-          item.releaseName,
-          item.name,
-          item.fileName
-        ].filter(Boolean);
-
-        const hasOtherSeason = names.some(n => otherSeasonRegex.test(n));
-        if (hasOtherSeason) return false;
-
-        return names.some(n => strictEpPatterns.some(rx => rx.test(n)) || seasonPackRegex.test(n));
-      });
-    } else if (sNum) {
-      const sPattern = `0*${sNum}`;
-      const seasonRegex = new RegExp(`(?:s|season[._ -]*)${sPattern}(?:[^0-9]|$)`, 'i');
-      const otherSeasonRegex = new RegExp(`(?:s|season[._ -]*)(?!0*${sNum}\\b)[0-9]+`, 'i');
-
-      list = list.filter(item => {
-        const itemS = item.season != null && item.season !== '' ? parseInt(item.season, 10) : null;
-        if (itemS !== null && !isNaN(itemS)) return itemS === sNum;
-
-        const names = [
-          ...(Array.isArray(item.releaseInfo) ? item.releaseInfo : [item.releaseInfo]),
-          item.release_name,
-          item.releaseName,
-          item.name,
-          item.fileName
-        ].filter(Boolean);
-
-        if (names.some(n => otherSeasonRegex.test(n))) return false;
-        return names.some(n => seasonRegex.test(n));
-      });
-    }
-
-    logs.matchedSubsCount = list.length;
-
-    const results = list.map(item => {
-      const subId = item.subtitleId || item.subId || item.id;
-      const langRaw = (item.Language || item.language || item.lang || '').toLowerCase();
-      const isArabic = langRaw.includes('arab') || langRaw === 'ar';
-
-      const relName = (Array.isArray(item.releaseInfo) ? item.releaseInfo[0] : '') || item.release_name || item.name || '';
-      const isAss = relName.toLowerCase().endsWith('.ass');
+    const results = list.map((item, index) => {
+      const rawLang = (item.lang || '').toLowerCase();
+      const isArabic = rawLang === 'ara' || rawLang === 'ar' || rawLang.includes('arab');
+      const directUrl = item.url || '';
+      const isAss = directUrl.toLowerCase().endsWith('.ass') || (item.id || '').toLowerCase().endsWith('.ass');
 
       return {
-        id: `subsource_${subId}`,
-        url: `subsource://${subId}?key=${encodeURIComponent(activeKey)}`,
-        lang: isArabic ? 'ara' : 'eng',
+        id: item.id || `subsource_${index + 1}`,
+        url: directUrl,
+        lang: isArabic ? 'ara' : (item.lang || 'eng'),
         format: isAss ? 'ass' : 'srt',
         _source: 'subsource',
         _priority: isArabic ? 1 : 2
@@ -189,27 +78,42 @@ async function getSubSource({ title, imdbId, season, episode, type, apiKey }, de
 
     return results;
   } catch (err) {
-    if (debugMode) return { fatalError: err.message, logs };
+    if (debugMode) {
+      return {
+        fatalError: err.message,
+        status: err.response?.status,
+        data: err.response?.data,
+        logs
+      };
+    }
     return [];
   }
 }
 
 async function fetchSubSourceBuffer(customUrl, debug = false) {
   try {
-    const cleanUrl = customUrl.replace('subsource://', '');
-    const [subIdPart, queryPart] = cleanUrl.split('?');
-    const subId = subIdPart;
-    const urlParams = new URLSearchParams(queryPart || '');
-    const apiKey = urlParams.get('key') || process.env.SUBSOURCE_API_KEY || '';
+    if (!customUrl) return Buffer.from('');
 
-    if (!subId) return Buffer.from('');
+    let downloadUrl = customUrl;
+    const headers = {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      'Accept': '*/*'
+    };
 
-    const downloadUrl = `https://api.subsource.net/api/v1/subtitles/${subId}/download`;
+    if (customUrl.startsWith('subsource://')) {
+      const cleanUrl = customUrl.replace('subsource://', '');
+      const [subIdPart, queryPart] = cleanUrl.split('?');
+      const subId = subIdPart;
+      const urlParams = new URLSearchParams(queryPart || '');
+      const apiKey = urlParams.get('key') || process.env.SUBSOURCE_API_KEY || '';
+
+      if (!subId) return Buffer.from('');
+      downloadUrl = `https://api.subsource.net/api/v1/subtitles/${subId}/download`;
+      headers['X-API-Key'] = apiKey;
+    }
+
     const res = await axios.get(downloadUrl, {
-      headers: {
-        'X-API-Key': apiKey,
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-      },
+      headers,
       responseType: 'arraybuffer',
       timeout: 10000
     });
