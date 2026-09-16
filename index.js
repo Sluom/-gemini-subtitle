@@ -139,7 +139,7 @@ function detectFormat(s) {
     s.url
   ].filter(Boolean).join(' ').toLowerCase();
 
-  if (checkStr.includes('.ass') || checkStr.includes('format=ass') || s.format === 'ass') {
+  if (s.format === 'ass' || checkStr.includes('.ass') || checkStr.includes('format=ass') || (checkStr.includes('animetosho') && checkStr.includes('.ass'))) {
     return 'ASS';
   }
   if (checkStr.includes('.vtt') || checkStr.includes('format=vtt') || s.format === 'vtt') {
@@ -315,7 +315,6 @@ app.get([
       sourceCounters[groupKey] = (sourceCounters[groupKey] || 0) + 1;
       const count = sourceCounters[groupKey];
 
-      // التوجيه الدقيق: فقط ملفات الـ ZIP الحقيقية تمر بالبروكسي
       const isActuallyZip = s._isZip === true || s.url.toLowerCase().endsWith('.zip');
       
       if (isActuallyZip) {
@@ -325,7 +324,6 @@ app.get([
       } else if (rawSource === 'opensubtitles-api' || s.url.includes('api.opensubtitles.com/api/v1/download/')) {
         finalUrl = `${baseUrl}/stream-os.srt?url=${encodeURIComponent(s.url)}&key=${encodeURIComponent(config.openSubtitlesKey || '')}&format=${ext.toLowerCase()}`;
       }
-      // باقي الروابط (subdl-mirror, opensubtitles-mirror, unpack_files, subsource) تعبر مباشرة للمشغل بدون وسيط
 
       return {
         id: `${siteName} - ${ext} #${count}`,
@@ -357,7 +355,6 @@ app.get([
   }
 });
 
-// بروكسي OpenSubtitles الرسمي المطور (يدعم POST لجلب الرابط الحقيقي)
 app.all(['/stream-os', '/stream-os.srt', '/api/stream-os', '/api/stream-os.srt'], async (req, res) => {
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   let subUrl = req.query.url;
@@ -422,7 +419,6 @@ app.all(['/stream-os', '/stream-os.srt', '/api/stream-os', '/api/stream-os.srt']
   }
 });
 
-// بروكسي الـ ZIP المحمي ضد الانهيار (إذا الملف مو ZIP يمرره مباشرة)
 app.all(['/stream-zip', '/stream-zip.srt', '/api/stream-zip', '/api/stream-zip.srt'], async (req, res) => {
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   const zipUrl = req.query.url;
@@ -443,7 +439,6 @@ app.all(['/stream-zip', '/stream-zip.srt', '/api/stream-zip', '/api/stream-zip.s
 
     let buffer = Buffer.from(response.data);
 
-    // فحص البايتات: إذا مو ZIP أصلي، يعني ملف SRT عادي مفكوك
     if (buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4b) {
       const zip = new AdmZip(buffer);
       const entry = findEpisodeInZip(zip, ep);
