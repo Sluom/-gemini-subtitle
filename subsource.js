@@ -9,6 +9,27 @@ function getHeaders(apiKey) {
   };
 }
 
+function pickSeasonMovie(list, sNum) {
+  if (!list || !list.length) return null;
+  if (!sNum) return list[0];
+
+  const seasonNum = parseInt(sNum, 10);
+
+  // 1. مطابقة خاصية season إذا كانت موجودة كحقل صريح
+  const byProp = list.find(m => {
+    const s = m.season != null ? parseInt(m.season, 10) : null;
+    return s === seasonNum;
+  });
+  if (byProp) return byProp;
+
+  // 2. مطابقة الاسم إذا كان يحتوي Season X أو S0X
+  const seasonRegex = new RegExp(`(?:season|s)[._ -]*0*${seasonNum}\\b`, 'i');
+  const byTitle = list.find(m => seasonRegex.test(m.title || m.name || ''));
+  if (byTitle) return byTitle;
+
+  return list[0];
+}
+
 async function getSubSource({ title, imdbId, season, episode, type, apiKey }, debugMode = false) {
   const activeKey = apiKey || process.env.SUBSOURCE_API_KEY || '';
   const logs = { apiKeyReceived: !!activeKey, imdbId, title, season, episode };
@@ -20,24 +41,43 @@ async function getSubSource({ title, imdbId, season, episode, type, apiKey }, de
   try {
     let movie = null;
     let cleanTitle = (title || '').replace(/\([^)]*\)/g, '').trim();
+    const sNum = season ? parseInt(season, 10) : null;
+    const eNum = episode ? parseInt(episode, 10) : null;
 
-    // 1. البحث باسم العمل
-    if (cleanTitle && !cleanTitle.startsWith('tt')) {
+    // 1. في المسلسلات: البحث باسم العمل مع رقم الموسم مباشرة لاستهداف الصفحة الصحيحة
+    if (cleanTitle && sNum && !cleanTitle.startsWith('tt')) {
+      try {
+        const queryWithSeason = `${cleanTitle} Season ${sNum}`;
+        const searchUrl = `https://api.subsource.net/api/v1/movies/search?q=${encodeURIComponent(queryWithSeason)}&searchType=text`;
+        const res = await axios.get(searchUrl, { headers: getHeaders(activeKey), timeout: 7000 });
+        const list = res.data?.data || res.data?.movies || [];
+        if (list.length > 0) {
+          movie = pickSeasonMovie(list, sNum);
+        }
+      } catch (e) {}
+    }
+
+    // 2. البحث بالاسم الصافي إذا لم يعثر عليه
+    if (!movie && cleanTitle && !cleanTitle.startsWith('tt')) {
       try {
         const textUrl = `https://api.subsource.net/api/v1/movies/search?q=${encodeURIComponent(cleanTitle)}&searchType=text`;
         const res = await axios.get(textUrl, { headers: getHeaders(activeKey), timeout: 7000 });
         const list = res.data?.data || res.data?.movies || [];
-        if (list.length > 0) movie = list[0];
+        if (list.length > 0) {
+          movie = sNum ? pickSeasonMovie(list, sNum) : list[0];
+        }
       } catch (e) {}
     }
 
-    // 2. البحث بـ IMDb إذا لم يعثر عليه بالاسم
+    // 3. البحث بـ IMDb
     if (!movie && imdbId && imdbId.startsWith('tt')) {
       try {
         const imdbUrl = `https://api.subsource.net/api/v1/movies/search?q=${imdbId}&searchType=imdb`;
         const res = await axios.get(imdbUrl, { headers: getHeaders(activeKey), timeout: 7000 });
         const list = res.data?.data || res.data?.movies || [];
-        if (list.length > 0) movie = list[0];
+        if (list.length > 0) {
+          movie = sNum ? pickSeasonMovie(list, sNum) : list[0];
+        }
       } catch (e) {}
     }
 
@@ -47,21 +87,22 @@ async function getSubSource({ title, imdbId, season, episode, type, apiKey }, de
     }
 
     const movieId = movie.movieId || movie.id;
-    logs.foundMovie = movie.title;
+    logs.selectedMovieTitle = movie.title;
     logs.movieId = movieId;
 
     if (!movieId) return [];
 
-    // 3. جلب قائمة الترجمات
+    // 4. جلب الترجمات الخاصة بالصفحة المختارة
     const getRes = await axios.get(
       `https://api.subsource.net/api/v1/subtitles?movieId=${movieId}`,
       { headers: getHeaders(activeKey), timeout: 8000 }
     );
 
     let list = getRes.data?.data || getRes.data?.subtitles || [];
+    logs.rawSubsFound = list.length;
     if (!list.length) return [];
 
-    // تصفية اللغات (عربي وإنكليزي)
+    // فلترة اللغات (العربية والإنجليزية)
     const validSubs = list.filter(item => {
       const l = (item.Language || item.language || item.lang || '').toLowerCase();
       return l.includes('arab') || l === 'ar' || l.includes('eng') || l === 'en';
@@ -69,32 +110,21 @@ async function getSubSource({ title, imdbId, season, episode, type, apiKey }, de
 
     list = validSubs.length > 0 ? validSubs : list;
 
-    // تصفية إجبارية وصارمة لرقم الموسم والحلقة معاً
-    if (season && episode) {
-      const sNum = parseInt(season, 10);
-      const eNum = parseInt(episode, 10);
+    // 5. مطابقة رقم الحلقة
+    if (eNum) {
+      const epRegex = new RegExp(`(?:e|ep|episode)[._ -]*0*${eNum}(?:[^0-9]|$)`, 'i');
+      const numMatchRegex = new RegExp(`[._ -[\(]0*${eNum}[._ -\]\)]`, 'i');
+      const sXPattern = sNum ? new RegExp(`(?:s|season)?0*${sNum}[._ -]*(?:e|ep|x)0*${eNum}(?:[^0-9]|$)`, 'i') : null;
 
-      const sPattern = `0*${sNum}`;
-      const ePattern = `0*${eNum}`;
-
-      // صيغ مطابقة إجبارية (يشترط وجود رقم هذا الموسم حصراً ورقم هذه الحلقة)
-      const strictPatterns = [
-        new RegExp(`(?:s|season[._ -]*)${sPattern}[._ -]*(?:e|ep|episode)[._ -]*${ePattern}(?:[^0-9]|$)`, 'i'),
-        new RegExp(`\\b${sPattern}x${ePattern}\\b`, 'i'),
-        new RegExp(`\\[${sPattern}[._ -]*[xe][._ -]*${ePattern}\\]`, 'i')
-      ];
-
-      list = list.filter(item => {
-        // إذا كان الموقع يرجع season و episode كأرقام صريحة في الكائن
-        const itemS = item.season != null && item.season !== '' ? parseInt(item.season, 10) : null;
-        const itemE = item.episode != null && item.episode !== '' ? parseInt(item.episode, 10) : null;
-
-        if (itemS !== null && itemE !== null && !isNaN(itemS) && !isNaN(itemE)) {
-          return itemS === sNum && itemE === eNum;
+      const matched = list.filter(item => {
+        // فحص الخصائص المباشرة للكائن
+        const itemE = item.episode != null ? parseInt(item.episode, 10) : null;
+        if (itemE !== null && !isNaN(itemE)) {
+          return itemE === eNum;
         }
 
-        // فحص أسماء ملفات النسخ المرفقة بالترجمة
-        const namesToCheck = [
+        // فحص أسماء ملفات النسخ
+        const names = [
           ...(Array.isArray(item.releaseInfo) ? item.releaseInfo : [item.releaseInfo]),
           item.release_name,
           item.releaseName,
@@ -102,15 +132,23 @@ async function getSubSource({ title, imdbId, season, episode, type, apiKey }, de
           item.fileName
         ].filter(Boolean);
 
-        return namesToCheck.some(name => strictPatterns.some(rx => rx.test(name)));
+        return names.some(n => {
+          if (sXPattern && sXPattern.test(n)) return true;
+          if (epRegex.test(n)) return true;
+          return numMatchRegex.test(n);
+        });
       });
+
+      if (matched.length > 0) {
+        list = matched;
+      }
     }
 
     const results = list.map(item => {
       const subId = item.subtitleId || item.subId || item.id;
       const langRaw = (item.Language || item.language || item.lang || '').toLowerCase();
       const isArabic = langRaw.includes('arab') || langRaw === 'ar';
-      
+
       const relName = (Array.isArray(item.releaseInfo) ? item.releaseInfo[0] : '') || item.release_name || item.name || '';
       const isAss = relName.toLowerCase().endsWith('.ass');
 
