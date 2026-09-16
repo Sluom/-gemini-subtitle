@@ -7,29 +7,11 @@ function getAxiosConfig(extraHeaders = {}) {
       'Accept': 'application/json',
       ...extraHeaders
     },
-    timeout: 8500
+    timeout: 7000
   };
 }
 
-// طلب رابط التحميل الفعلي من الـ API الرسمي
-async function resolveDownloadLink(fileId, apiKey) {
-  if (!fileId || !apiKey) return null;
-  try {
-    const res = await axios.post(
-      'https://api.opensubtitles.com/api/v1/download',
-      { file_id: fileId },
-      getAxiosConfig({
-        'Api-Key': apiKey.trim(),
-        'Content-Type': 'application/json'
-      })
-    );
-    return res.data?.link || null;
-  } catch (e) {
-    return null;
-  }
-}
-
-// سحب كافة الترجمات العربية المتوفرة من الـ API الرسمي بدون أي لمت
+// 1. سحب شكو ترجمة عربية مسجلة بالـ API الرسمي دفعة واحدة
 async function fetchOpenSubtitlesOfficial(imdbId, season, episode, apiKey) {
   if (!apiKey || !imdbId || !imdbId.startsWith('tt')) return [];
 
@@ -47,7 +29,7 @@ async function fetchOpenSubtitlesOfficial(imdbId, season, episode, apiKey) {
     const res = await axios.get(url, getAxiosConfig({ 'Api-Key': apiKey.trim() }));
     const data = res.data?.data || [];
 
-    const candidates = [];
+    const results = [];
 
     data.forEach(item => {
       const attr = item.attributes || {};
@@ -58,6 +40,8 @@ async function fetchOpenSubtitlesOfficial(imdbId, season, episode, apiKey) {
       if (!isArabic) return;
 
       files.forEach(file => {
+        if (!file.file_id) return;
+
         const rawName = (file.file_name || attr.release || '').toLowerCase();
         let detectedFormat = 'srt';
 
@@ -67,49 +51,27 @@ async function fetchOpenSubtitlesOfficial(imdbId, season, episode, apiKey) {
           detectedFormat = 'vtt';
         }
 
-        if (file.file_id) {
-          candidates.push({
-            fileId: file.file_id,
-            lang: 'ara',
-            format: detectedFormat,
-            ext: detectedFormat,
-            fileName: file.file_name || attr.release || '',
-            origName: file.file_name || attr.release || 'OpenSubtitles Official',
-            _source: 'opensubtitles',
-            _priority: detectedFormat === 'ass' ? 0 : 1
-          });
-        }
+        // تحويل الرابط إلى مسار داخلي مثل SubSense تماماً لمنع الحظر
+        results.push({
+          url: `os://${file.file_id}?format=${detectedFormat}&name=${encodeURIComponent(file.file_name || '')}`,
+          lang: 'ara',
+          format: detectedFormat,
+          ext: detectedFormat,
+          fileName: file.file_name || attr.release || '',
+          origName: file.file_name || attr.release || 'OpenSubtitles Official',
+          _source: 'opensubtitles',
+          _priority: detectedFormat === 'ass' ? 0 : 1
+        });
       });
     });
 
-    // جلب الروابط بالتوازي لضمان سرعة الاستجابة
-    const resolvedSubs = await Promise.allSettled(
-      candidates.map(async item => {
-        const directUrl = await resolveDownloadLink(item.fileId, apiKey);
-        if (!directUrl) return null;
-        return {
-          url: directUrl,
-          lang: item.lang,
-          format: item.format,
-          ext: item.ext,
-          fileName: item.fileName,
-          origName: item.origName,
-          _source: item._source,
-          _priority: item._priority
-        };
-      })
-    );
-
-    return resolvedSubs
-      .filter(r => r.status === 'fulfilled' && r.value)
-      .map(r => r.value);
-
+    return results;
   } catch (e) {
     return [];
   }
 }
 
-// سحب كافة الترجمات العربية المتوفرة من سيرفر الـ Mirror
+// 2. سحب ترجمات الميرور العام
 async function fetchOpenSubtitlesMirror(imdbId, season, episode, type) {
   if (!imdbId || !imdbId.startsWith('tt')) return [];
   try {
@@ -173,7 +135,7 @@ async function fetchOpenSubtitlesMirror(imdbId, season, episode, type) {
   }
 }
 
-// دمج كل النتائج بالكامل بالتوازي دون أي سقف أو لمت
+// 3. دمج المصدرين سوية بالتوازي بدون لمت
 async function getOpenSubtitles({ imdbId, season, episode, type, apiKey }) {
   if (!imdbId || !imdbId.startsWith('tt')) return [];
 
