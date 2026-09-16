@@ -14,7 +14,7 @@ function getAxiosConfig(apiKey) {
   return { headers, timeout: TIMEOUT };
 }
 
-// فحص دقيق وشامل لصيغ SSA و ASS
+// فحص دقيق وشامل لملفات الـ ASS و SSA
 function checkIsAss(file, attr) {
   const fileName = (file?.file_name || '').toLowerCase();
   const release = (attr?.release || '').toLowerCase();
@@ -37,57 +37,70 @@ function checkIsAss(file, attr) {
   );
 }
 
+// دالة تنفيذ طلب البحث في API OpenSubtitles الرسمي
 async function searchOpenSubtitlesApi(paramsObj, apiKey) {
-  const params = new URLSearchParams();
-  for (const [key, value] of Object.entries(paramsObj)) {
-    if (value != null && value !== '') {
-      params.set(key, String(value));
+  try {
+    const params = new URLSearchParams();
+    for (const [key, value] of Object.entries(paramsObj)) {
+      if (value != null && value !== '') {
+        params.set(key, String(value));
+      }
     }
-  }
 
-  const url = `https://api.opensubtitles.com/api/v1/subtitles?${params.toString()}`;
-  const res = await axios.get(url, getAxiosConfig(apiKey));
-  return Array.isArray(res.data?.data) ? res.data.data : [];
+    const url = `https://api.opensubtitles.com/api/v1/subtitles?${params.toString()}`;
+    const res = await axios.get(url, getAxiosConfig(apiKey));
+    return Array.isArray(res.data?.data) ? res.data.data : [];
+  } catch (err) {
+    return [];
+  }
 }
 
-// 1. السحب عبر الـ API الرسمي
+// السحب عبر الـ API الرسمي بالمفتاح
 async function fetchOfficial(imdbId, season, episode, type, apiKey) {
   if (!apiKey || !imdbId || !imdbId.startsWith('tt')) return [];
 
   const cleanNumericId = imdbId.replace(/^tt/, '').replace(/^0+/, '');
-  const isSeries = type === 'series' || season != null;
+  const isEpisodic = episode != null || season != null || type === 'series' || type === 'anime';
 
-  let items = [];
+  const baseParams = {
+    languages: 'ar,ara'
+  };
 
-  try {
-    if (isSeries && season != null && episode != null) {
-      items = await searchOpenSubtitlesApi({
-        parent_imdb_id: cleanNumericId,
-        season_number: season,
-        episode_number: episode,
-        languages: 'ar'
-      }, apiKey);
-
-      if (!items.length) {
-        items = await searchOpenSubtitlesApi({
-          imdb_id: cleanNumericId,
-          season_number: season,
-          episode_number: episode,
-          languages: 'ar'
-        }, apiKey);
-      }
-    } else {
-      items = await searchOpenSubtitlesApi({
-        imdb_id: cleanNumericId,
-        languages: 'ar'
-      }, apiKey);
-    }
-  } catch (err) {
-    items = [];
+  if (isEpisodic) {
+    baseParams.parent_imdb_id = cleanNumericId;
+    if (season != null) baseParams.season_number = season;
+    if (episode != null) baseParams.episode_number = episode;
+  } else {
+    baseParams.imdb_id = cleanNumericId;
   }
 
+  // نطلب ملفات ASS/SSA بطلب مخصص وملفات SRT بطلب مخصص لضمان عدم ضياعها بسبب الترقيم
+  let [assItems, srtItems] = await Promise.all([
+    searchOpenSubtitlesApi({ ...baseParams, formats: 'ass,ssa' }, apiKey),
+    searchOpenSubtitlesApi({ ...baseParams, formats: 'srt' }, apiKey)
+  ]);
+
+  // فحص احتياطي برقم imdb_id المباشر في حال لم ترجع نتائج بـ parent_imdb_id
+  if (!assItems.length && !srtItems.length && isEpisodic) {
+    const fallbackParams = {
+      imdb_id: cleanNumericId,
+      languages: 'ar,ara'
+    };
+    if (season != null) fallbackParams.season_number = season;
+    if (episode != null) fallbackParams.episode_number = episode;
+
+    const [fbAss, fbSrt] = await Promise.all([
+      searchOpenSubtitlesApi({ ...fallbackParams, formats: 'ass,ssa' }, apiKey),
+      searchOpenSubtitlesApi({ ...fallbackParams, formats: 'srt' }, apiKey)
+    ]);
+    assItems = fbAss;
+    srtItems = fbSrt;
+  }
+
+  const allRawItems = [...assItems, ...srtItems];
   const results = [];
-  items.forEach(item => {
+
+  allRawItems.forEach(item => {
     const attr = item.attributes || {};
     const files = attr.files || [];
 
@@ -115,12 +128,12 @@ async function fetchOfficial(imdbId, season, episode, type, apiKey) {
   return results;
 }
 
-// 2. السحب عبر سيرفر Stremio (سيرفر SubSense الأساسي لصيد الـ SSA)
+// السحب الاحتياطي عبر سيرفر Stremio
 async function fetchMirror(imdbId, season, episode, type) {
   if (!imdbId || !imdbId.startsWith('tt')) return [];
 
   try {
-    const isSeries = type === 'series' || !!season;
+    const isSeries = type === 'series' || type === 'anime' || !!season;
     const mediaType = isSeries ? 'series' : 'movie';
     const targetId = isSeries && season ? `${imdbId}:${season}:${episode || 1}` : imdbId;
 
@@ -138,7 +151,6 @@ async function fetchMirror(imdbId, season, episode, type) {
         const rawName = (s.SubFileName || s.title || s.name || '').toLowerCase();
         const subFormat = (s.SubFormat || s.format || s.subFormat || '').toLowerCase();
 
-        // صيد صيغة SSA المعتمدة بسيرفر OpenSubtitles
         const isAss = subFormat === 'ssa' ||
                       subFormat === 'ass' ||
                       rawUrl.includes('.ass') ||
@@ -154,7 +166,6 @@ async function fetchMirror(imdbId, season, episode, type) {
           format: format,
           ext: format,
           subFormat: isAss ? 'ssa' : 'srt',
-          SubFormat: isAss ? 'ssa' : 'srt',
           fileName: s.SubFileName || s.title || s.name || 'OpenSubtitles Mirror',
           origName: s.SubFileName || s.title || s.name || 'OpenSubtitles Mirror',
           _source: 'opensubtitles',
