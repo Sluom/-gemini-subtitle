@@ -655,26 +655,20 @@ app.all(['/stream-zip', '/stream-zip.srt'], async (req, res) => {
   try {
     const response = await axios.get(zipUrl, {
       responseType: 'arraybuffer',
-      timeout: 12000,
+      timeout: 10000,
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Referer': 'https://subdl.com/',
-        'Accept': '*/*'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
       }
     });
 
-    let buffer = Buffer.from(response.data);
+    const zip = new AdmZip(Buffer.from(response.data));
+    const entry = findEpisodeInZip(zip, ep);
 
-    if (buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4b) {
-      const zip = new AdmZip(buffer);
-      const entry = findEpisodeInZip(zip, ep);
-      if (entry) {
-        buffer = entry.getData();
-      }
-    }
+    if (!entry) return res.status(404).send('Episode not found in archive');
 
-    const content = fixArabicEncoding(buffer);
-    const isAss = content.slice(0, 300).toString('utf-8').includes('[Script Info]');
+    const rawContent = entry.getData();
+    const content = fixArabicEncoding(rawContent);
+    const isAss = entry.entryName.toLowerCase().endsWith('.ass');
 
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', '*');
