@@ -135,31 +135,52 @@ function findEpisodeInZip(zip, episode) {
   return defaultAss || subEntries[0] || null;
 }
 
+// دالة فحص دقيقة للتمييز بين SSA و ASS و SRT بدون أخطاء تشابه الأسماء
 function detectFormat(s) {
-  const checkStr = [
-    s.format,
-    s.ext,
-    s.extension,
-    s.subFormat,
-    s.SubFormat,
-    s.name,
-    s.fileName,
-    s.origName,
-    s.url
-  ].filter(Boolean).join(' ').toLowerCase();
+  const formatVal = (s.format || '').toLowerCase();
+  const subFormatVal = (s.subFormat || s.SubFormat || '').toLowerCase();
+  const extVal = (s.ext || s.extension || '').toLowerCase();
+  const rawName = (s.fileName || s.origName || s.name || '').toLowerCase();
+  const rawUrl = (s.url || '').toLowerCase();
 
   if (
-    checkStr.includes('ssa') ||
-    checkStr.includes('ass') ||
-    checkStr.includes('format=ass') ||
-    checkStr.includes('format=ssa')
+    formatVal === 'ssa' ||
+    subFormatVal === 'ssa' ||
+    extVal === 'ssa' ||
+    rawUrl.includes('.ssa') ||
+    rawUrl.includes('format=ssa') ||
+    rawName.endsWith('.ssa') ||
+    rawName.includes('.ssa') ||
+    rawName.includes('[ssa]')
   ) {
-    return 'ASS';
+    return 'ssa';
   }
-  if (checkStr.includes('.vtt') || checkStr.includes('format=vtt') || s.format === 'vtt') {
-    return 'VTT';
+
+  if (
+    formatVal === 'ass' ||
+    subFormatVal === 'ass' ||
+    extVal === 'ass' ||
+    rawUrl.includes('.ass') ||
+    rawUrl.includes('format=ass') ||
+    rawName.endsWith('.ass') ||
+    rawName.includes('.ass') ||
+    rawName.includes('[ass]')
+  ) {
+    return 'ass';
   }
-  return 'SRT';
+
+  if (
+    formatVal === 'vtt' ||
+    subFormatVal === 'vtt' ||
+    extVal === 'vtt' ||
+    rawUrl.includes('.vtt') ||
+    rawUrl.includes('format=vtt') ||
+    rawName.endsWith('.vtt')
+  ) {
+    return 'vtt';
+  }
+
+  return 'srt';
 }
 
 app.post('/api/test-key', async (req, res) => {
@@ -595,7 +616,8 @@ app.get([
 
     const formatted = allSubs.map((s) => {
       let finalUrl = s.url;
-      const ext = detectFormat(s);
+      const ext = detectFormat(s); // ترجع: 'ssa' أو 'ass' أو 'vtt' أو 'srt'
+      const isAssTrack = ext === 'ass' || ext === 'ssa';
       const rawSource = (s._source || '').toLowerCase();
       let siteName = 'Subtitles';
 
@@ -611,7 +633,6 @@ app.get([
       const count = sourceCounters[groupKey];
 
       const isActuallyZip = s._isZip === true || s.url.toLowerCase().endsWith('.zip');
-      const isAssTrack = ext === 'ASS';
 
       if (isActuallyZip) {
         finalUrl = `${baseUrl}/stream-zip.${isAssTrack ? 'ass' : 'srt'}?url=${encodeURIComponent(s.url)}&ep=${s._episode || episode || 1}`;
@@ -619,17 +640,25 @@ app.get([
         finalUrl = `${baseUrl}/stream-subsource.${isAssTrack ? 'ass' : 'srt'}?data=${encodeURIComponent(s.url)}`;
       } else if (s.url.startsWith('os://')) {
         finalUrl = `${baseUrl}/stream-os.${isAssTrack ? 'ass' : 'srt'}?data=${encodeURIComponent(s.url)}&key=${encodeURIComponent(config.openSubtitlesKey || '')}`;
-      } else if (isAssTrack && (!finalUrl.toLowerCase().endsWith('.ass') && !finalUrl.toLowerCase().endsWith('.ssa'))) {
-        // توجيه ترجمات SSA/ASS القادمة كروابط مباشرة عبر بروكسي لضمان صيغة .ass ومعالجة الضغط والترميز
-        finalUrl = `${baseUrl}/stream-proxy.ass?url=${encodeURIComponent(finalUrl)}`;
+      } else if (isAssTrack) {
+        if (!finalUrl.toLowerCase().endsWith('.ass') && !finalUrl.toLowerCase().endsWith('.ssa')) {
+          finalUrl = `${baseUrl}/stream-proxy.ass?url=${encodeURIComponent(finalUrl)}`;
+        }
+      } else if (rawSource.includes('opensubtitles') || finalUrl.includes('opensubtitles') || finalUrl.includes('strem.io')) {
+        // حماية ترجمات OpenSubtitles العادية وتمريرها عبر البروكسي لفك ضغط gzip وتصحيح ترميز ويندوز-1256
+        finalUrl = `${baseUrl}/stream-proxy.srt?url=${encodeURIComponent(finalUrl)}`;
       }
 
+      // بناء معرف المسار مطابقاً تماماً لقالب المشغل مثل SubSense: nuvio-ssa-opensubtitles-ara-1
+      const sourceTag = rawSource.replace(/[^a-z0-9]/g, '') || siteName.toLowerCase();
+      const subId = `nuvio-${ext}-${sourceTag}-ara-${count}`;
+
       return {
-        id: `${siteName} - ${ext} #${count}`,
+        id: subId,
         url: finalUrl,
         lang: s.lang || 'ara',
-        format: ext.toLowerCase(),
-        _priority: s._priority || 2
+        format: ext,
+        _priority: s._priority !== undefined ? s._priority : (isAssTrack ? 0 : 2)
       };
     });
 
@@ -655,7 +684,7 @@ app.get([
   }
 });
 
-// بروكسي عام لفك ضغط وسحب وتدفق ملفات الترجمة المباشرة (OpenSubtitles Mirror وغيره) بصيغة ASS خام
+// بروكسي عام لفك ضغط وسحب وتدفق ملفات الترجمة المباشرة مع تصحيح الترميز العربي
 app.all(['/stream-proxy', '/stream-proxy.srt', '/stream-proxy.ass'], async (req, res) => {
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   const targetUrl = req.query.url;
@@ -672,12 +701,12 @@ app.all(['/stream-proxy', '/stream-proxy.srt', '/stream-proxy.ass'], async (req,
 
     let buffer = Buffer.from(response.data);
 
-    // فك ضغط Gzip في حال كان الملف مضغوطاً عبر سيرفر OpenSubtitles
+    // فك ضغط Gzip التلقائي لملفات سيرفرات OpenSubtitles
     if (buffer.length >= 2 && buffer[0] === 0x1f && buffer[1] === 0x8b) {
       buffer = zlib.gunzipSync(buffer);
     }
 
-    // فك ضغط ZIP في حال كان ملف أرشيف
+    // فك ضغط ZIP في حال كان أرشيف
     if (buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4b) {
       const zip = new AdmZip(buffer);
       const entries = zip.getEntries();
@@ -792,6 +821,7 @@ app.all(['/stream-os', '/stream-os.srt', '/stream-os.ass'], async (req, res) => 
   }
 });
 
+// فك واستخراج ملف الحلقة من أرشيف ZIP
 app.all(['/stream-zip', '/stream-zip.srt', '/stream-zip.ass'], async (req, res) => {
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   const zipUrl = req.query.url;
@@ -834,6 +864,7 @@ app.all(['/stream-zip', '/stream-zip.srt', '/stream-zip.ass'], async (req, res) 
   }
 });
 
+// بث ترجمات SubSource
 app.all(['/stream-subsource', '/stream-subsource.srt', '/stream-subsource.ass'], async (req, res) => {
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   const dataUrl = req.query.data;
