@@ -12,16 +12,25 @@ function getHeaders(apiKey) {
 function pickBestMovie(list, cleanTitle, sNum) {
   if (!list || !list.length) return null;
 
-  // 1. إذا كان مسلسل، نفحص إذا كان السيرفر مسجل مواسم منفصلة بالاسم
+  const normClean = cleanTitle.toLowerCase().replace(/[^a-z0-9]/g, '');
+
   if (sNum) {
     const seasonRegex = new RegExp(`(?:season|s)[._ -]*0*${sNum}\\b`, 'i');
     const seasonMatch = list.find(m => seasonRegex.test(m.title || m.name || ''));
     if (seasonMatch) return seasonMatch;
   }
 
-  // 2. مطابقة اسم العمل الأصلي تماماً
-  const exactMatch = list.find(m => (m.title || m.name || '').trim().toLowerCase() === cleanTitle.toLowerCase());
+  const exactMatch = list.find(m => {
+    const t = (m.title || m.name || '').replace(/\([^)]*\)/g, '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    return t === normClean;
+  });
   if (exactMatch) return exactMatch;
+
+  const startMatch = list.find(m => {
+    const words = (m.title || m.name || '').toLowerCase().split(/[^a-z0-9]+/);
+    return words[0] === cleanTitle.toLowerCase().split(/[^a-z0-9]+/)[0];
+  });
+  if (startMatch) return startMatch;
 
   return list[0];
 }
@@ -40,8 +49,20 @@ async function getSubSource({ title, imdbId, season, episode, type, apiKey }, de
     const sNum = season ? parseInt(season, 10) : null;
     const eNum = episode ? parseInt(episode, 10) : null;
 
-    // 1. البحث باسم العمل الصافي فقط (بدون إضافة Season لتفادي تصفير نتائج البحث)
-    if (cleanTitle && !cleanTitle.startsWith('tt')) {
+    if (imdbId && imdbId.startsWith('tt')) {
+      try {
+        const imdbUrl = `https://api.subsource.net/api/v1/movies/search?q=${imdbId}&searchType=imdb`;
+        const res = await axios.get(imdbUrl, { headers: getHeaders(activeKey), timeout: 7000 });
+        const list = res.data?.data || res.data?.movies || [];
+        if (list.length > 0) {
+          movie = sNum ? pickBestMovie(list, cleanTitle, sNum) : list[0];
+        }
+      } catch (e) {
+        logs.imdbSearchError = e.response?.status || e.message;
+      }
+    }
+
+    if (!movie && cleanTitle && !cleanTitle.startsWith('tt')) {
       try {
         const textUrl = `https://api.subsource.net/api/v1/movies/search?q=${encodeURIComponent(cleanTitle)}&searchType=text`;
         const res = await axios.get(textUrl, { headers: getHeaders(activeKey), timeout: 7000 });
@@ -51,20 +72,6 @@ async function getSubSource({ title, imdbId, season, episode, type, apiKey }, de
         }
       } catch (e) {
         logs.textSearchError = e.response?.status || e.message;
-      }
-    }
-
-    // 2. البحث بـ IMDb كخيار بديل إذا لم يعثر عليه بالاسم
-    if (!movie && imdbId && imdbId.startsWith('tt')) {
-      try {
-        const imdbUrl = `https://api.subsource.net/api/v1/movies/search?q=${imdbId}&searchType=imdb`;
-        const res = await axios.get(imdbUrl, { headers: getHeaders(activeKey), timeout: 7000 });
-        const list = res.data?.data || res.data?.movies || [];
-        if (list.length > 0) {
-          movie = pickBestMovie(list, cleanTitle, sNum);
-        }
-      } catch (e) {
-        logs.imdbSearchError = e.response?.status || e.message;
       }
     }
 
@@ -79,9 +86,8 @@ async function getSubSource({ title, imdbId, season, episode, type, apiKey }, de
 
     if (!movieId) return [];
 
-    // 3. جلب الترجمات التابعة للعمل
     const getRes = await axios.get(
-      `https://api.subsource.net/api/v1/subtitles?movieId=${movieId}`,
+      `https://api.subsource.net/api/v1/subtitles?movieId=${movieId}&limit=100`,
       { headers: getHeaders(activeKey), timeout: 8000 }
     );
 
@@ -89,7 +95,6 @@ async function getSubSource({ title, imdbId, season, episode, type, apiKey }, de
     logs.rawSubsFound = list.length;
     if (!list.length) return [];
 
-    // 4. فلترة اللغات (عربي وإنكليزي حصراً)
     list = list.filter(item => {
       const l = (item.Language || item.language || item.lang || '').toLowerCase();
       return l.includes('arab') || l === 'ar' || l.includes('eng') || l === 'en';
@@ -97,19 +102,20 @@ async function getSubSource({ title, imdbId, season, episode, type, apiKey }, de
 
     if (!list.length) return [];
 
-    // 5. فلترة الموسم والحلقة للمسلسلات بشكل إجباري ومحكم
     if (sNum && eNum) {
       const sPattern = `0*${sNum}`;
       const ePattern = `0*${eNum}`;
 
-      const strictPatterns = [
+      const strictEpPatterns = [
         new RegExp(`(?:s|season[._ -]*)${sPattern}[._ -]*(?:e|ep|episode)[._ -]*${ePattern}(?:[^0-9]|$)`, 'i'),
         new RegExp(`\\b${sPattern}x${ePattern}\\b`, 'i'),
         new RegExp(`\\[${sPattern}[._ -]*[xe][._ -]*${ePattern}\\]`, 'i')
       ];
 
+      const seasonPackRegex = new RegExp(`(?:s|season[._ -]*)${sPattern}\\b.*(?:complete|full|pack|batch|all)`, 'i');
+      const otherSeasonRegex = new RegExp(`(?:s|season[._ -]*)(?!0*${sNum}\\b)[0-9]+`, 'i');
+
       list = list.filter(item => {
-        // فحص حقول الموسم والحلقة المباشرة إذا وفرها السيرفر
         const itemS = item.season != null && item.season !== '' ? parseInt(item.season, 10) : null;
         const itemE = item.episode != null && item.episode !== '' ? parseInt(item.episode, 10) : null;
 
@@ -117,7 +123,10 @@ async function getSubSource({ title, imdbId, season, episode, type, apiKey }, de
           return itemS === sNum && itemE === eNum;
         }
 
-        // فحص أسماء ملفات النسخ بنمط إجباري يطابق الموسم والحلقة معاً
+        if (itemS !== null && !isNaN(itemS) && itemS === sNum && (itemE === null || isNaN(itemE))) {
+          return true;
+        }
+
         const names = [
           ...(Array.isArray(item.releaseInfo) ? item.releaseInfo : [item.releaseInfo]),
           item.release_name,
@@ -126,11 +135,16 @@ async function getSubSource({ title, imdbId, season, episode, type, apiKey }, de
           item.fileName
         ].filter(Boolean);
 
-        return names.some(n => strictPatterns.some(rx => rx.test(n)));
+        const hasOtherSeason = names.some(n => otherSeasonRegex.test(n));
+        if (hasOtherSeason) return false;
+
+        return names.some(n => strictEpPatterns.some(rx => rx.test(n)) || seasonPackRegex.test(n));
       });
     } else if (sNum) {
-      // في حال كان الطلب لموسم كامل فقط
-      const seasonRegex = new RegExp(`(?:s|season[._ -]*)${sNum}(?:[^0-9]|$)`, 'i');
+      const sPattern = `0*${sNum}`;
+      const seasonRegex = new RegExp(`(?:s|season[._ -]*)${sPattern}(?:[^0-9]|$)`, 'i');
+      const otherSeasonRegex = new RegExp(`(?:s|season[._ -]*)(?!0*${sNum}\\b)[0-9]+`, 'i');
+
       list = list.filter(item => {
         const itemS = item.season != null && item.season !== '' ? parseInt(item.season, 10) : null;
         if (itemS !== null && !isNaN(itemS)) return itemS === sNum;
@@ -143,6 +157,7 @@ async function getSubSource({ title, imdbId, season, episode, type, apiKey }, de
           item.fileName
         ].filter(Boolean);
 
+        if (names.some(n => otherSeasonRegex.test(n))) return false;
         return names.some(n => seasonRegex.test(n));
       });
     }
