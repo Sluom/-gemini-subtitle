@@ -242,16 +242,6 @@ app.post('/api/test-key', async (req, res) => {
         } catch (e2) {}
       }
 
-      if (!valid) {
-        try {
-          const r3 = await axios.get('https://api.subdl.com/api/v1/subtitles?film_name=Inception&languages=EN', {
-            headers: { 'Authorization': `Bearer ${cleanKey}`, 'X-API-Key': cleanKey },
-            timeout: 7000
-          });
-          if (r3.status === 200 && (r3.data?.status === true || r3.data?.results)) valid = true;
-        } catch (e3) {}
-      }
-
       if (valid) return res.json({ success: true, message: 'مفتاح SubDL صالح 100% ✅' });
     } else if (provider === 'wyzie') {
       if (cleanKey.length > 10) return res.json({ success: true, message: 'مفتاح Wyzie Subs صالح 100% ✅' });
@@ -613,6 +603,8 @@ app.get([
         finalUrl = `${baseUrl}/stream-zip.srt?url=${encodeURIComponent(s.url)}&ep=${s._episode || episode || 1}`;
       } else if (s.url.startsWith('subsource://')) {
         finalUrl = `${baseUrl}/stream-subsource.srt?data=${encodeURIComponent(s.url)}`;
+      } else if (s.url.startsWith('os://')) {
+        finalUrl = `${baseUrl}/stream-os.srt?data=${encodeURIComponent(s.url)}&key=${encodeURIComponent(config.openSubtitlesKey || '')}`;
       }
 
       return {
@@ -642,6 +634,69 @@ app.get([
     res.json({ subtitles: uniqueSubs });
   } catch (err) {
     res.json({ subtitles: [] });
+  }
+});
+
+// مسار فك وتشغيل ترجمات OpenSubtitles الفردية عند الضغط عليها فقط
+app.all(['/stream-os', '/stream-os.srt'], async (req, res) => {
+  if (req.method === 'OPTIONS') return res.sendStatus(200);
+  const dataUrl = req.query.data || '';
+  const apiKey = req.query.key || '';
+
+  if (!dataUrl) return res.status(400).send('Missing data');
+
+  try {
+    const parsed = new URL(dataUrl.replace('os://', 'http://dummy.com/'));
+    const fileId = parseInt(parsed.pathname.replace('/', ''), 10);
+    const formatParam = parsed.searchParams.get('format') || 'srt';
+
+    if (!fileId || !apiKey) return res.status(400).send('Missing fileId or apiKey');
+
+    const dlRes = await axios.post(
+      'https://api.opensubtitles.com/api/v1/download',
+      { file_id: fileId },
+      {
+        headers: {
+          'Api-Key': apiKey.trim(),
+          'User-Agent': 'NuvioSubtitles v1.0.0',
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        timeout: 8000
+      }
+    );
+
+    const directLink = dlRes.data?.link;
+    if (!directLink) return res.status(404).send('Download link not found');
+
+    const fileRes = await axios.get(directLink, {
+      responseType: 'arraybuffer',
+      timeout: 10000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': '*/*'
+      }
+    });
+
+    let buffer = Buffer.from(fileRes.data);
+
+    if (buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4b) {
+      const zip = new AdmZip(buffer);
+      const entries = zip.getEntries();
+      const subEntry = entries.find(e => !e.isDirectory && (e.entryName.endsWith('.srt') || e.entryName.endsWith('.ass') || e.entryName.endsWith('.vtt')));
+      if (subEntry) buffer = subEntry.getData();
+    }
+
+    const fixedBuffer = fixArabicEncoding(buffer);
+    const contentCheck = fixedBuffer.slice(0, 300).toString('utf-8');
+    const isAss = formatParam === 'ass' || contentCheck.includes('[Script Info]');
+
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Headers', '*');
+    res.setHeader('Content-Type', isAss ? 'text/x-ssa; charset=utf-8' : 'application/x-subrip; charset=utf-8');
+    res.send(fixedBuffer);
+  } catch (e) {
+    res.status(500).send('Error streaming OpenSubtitles');
   }
 });
 
