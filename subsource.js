@@ -4,13 +4,12 @@ function getHeaders(apiKey) {
   return {
     'X-API-Key': apiKey || '',
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-    'Accept': 'application/json',
-    'Content-Type': 'application/json'
+    'Accept': 'application/json'
   };
 }
 
 async function getSubSource({ title, imdbId, season, episode, type, apiKey }, debugMode = false) {
-  const logs = { apiKeyReceived: !!apiKey, imdbId, title, attempts: [] };
+  const logs = { apiKeyReceived: !!apiKey, imdbId, title };
   if (!apiKey) {
     if (debugMode) return { error: 'SubSource API Key is MISSING', logs };
     return [];
@@ -20,16 +19,14 @@ async function getSubSource({ title, imdbId, season, episode, type, apiKey }, de
     let movie = null;
     let cleanTitle = (title || '').replace(/\([^)]*\)/g, '').trim();
 
-    // 1. البحث باسم العمل
+    // 1. البحث بالاسم
     if (cleanTitle && !cleanTitle.startsWith('tt')) {
       try {
         const textUrl = `https://api.subsource.net/api/v1/movies/search?q=${encodeURIComponent(cleanTitle)}&searchType=text`;
         const res = await axios.get(textUrl, { headers: getHeaders(apiKey), timeout: 7000 });
         const list = res.data?.data || res.data?.movies || [];
         if (list.length > 0) movie = list[0];
-      } catch (e) {
-        logs.textSearchError = e.response?.status || e.message;
-      }
+      } catch (e) {}
     }
 
     // 2. البحث بـ IMDb إذا لم يعثر عليه بالاسم
@@ -39,9 +36,7 @@ async function getSubSource({ title, imdbId, season, episode, type, apiKey }, de
         const res = await axios.get(imdbUrl, { headers: getHeaders(apiKey), timeout: 7000 });
         const list = res.data?.data || res.data?.movies || [];
         if (list.length > 0) movie = list[0];
-      } catch (e) {
-        logs.imdbSearchError = e.response?.status || e.message;
-      }
+      } catch (e) {}
     }
 
     if (!movie) {
@@ -49,70 +44,26 @@ async function getSubSource({ title, imdbId, season, episode, type, apiKey }, de
       return [];
     }
 
-    // استخراج معرف الفلم الحقيقي بناءً على تقرير الفحص
     const movieId = movie.movieId || movie.id;
     logs.foundMovie = movie.title;
     logs.movieId = movieId;
 
-    if (!movieId) {
-      if (debugMode) return { error: 'Missing movieId in movie object', rawMovie: movie, logs };
-      return [];
-    }
+    if (!movieId) return [];
 
-    // 3. جلب قائمة الترجمات باستخدام movieId
-    let list = [];
+    // 3. جلب الترجمات عبر المسار الذي نجح بالفحص
+    const getRes = await axios.get(
+      `https://api.subsource.net/api/v1/subtitles?movieId=${movieId}`,
+      { headers: getHeaders(apiKey), timeout: 8000 }
+    );
 
-    // محاولة POST الرسمية بـ movieId
-    try {
-      const postRes = await axios.post(
-        'https://api.subsource.net/api/v1/subtitles/search',
-        {
-          movieId: movieId,
-          lang: ['Arabic', 'English']
-        },
-        { headers: getHeaders(apiKey), timeout: 8000 }
-      );
-      const items = postRes.data?.data || postRes.data?.subtitles || [];
-      logs.attempts.push({ type: 'POST /search (movieId)', status: postRes.status, count: items.length });
-      if (items.length > 0) list = items;
-    } catch (e) {
-      logs.attempts.push({ type: 'POST /search (movieId)', error: e.response?.status || e.message });
-    }
-
-    // محاولة GET الاحتياطية بـ movieId
-    if (!list.length) {
-      try {
-        const getRes = await axios.get(
-          `https://api.subsource.net/api/v1/subtitles?movieId=${movieId}&lang=arabic,english`,
-          { headers: getHeaders(apiKey), timeout: 7000 }
-        );
-        const items = getRes.data?.data || getRes.data?.subtitles || [];
-        logs.attempts.push({ type: 'GET /subtitles?movieId', status: getRes.status, count: items.length });
-        if (items.length > 0) list = items;
-      } catch (e) {
-        logs.attempts.push({ type: 'GET /subtitles?movieId', error: e.response?.status || e.message });
-      }
-    }
-
-    // محاولة مسار movie/:id
-    if (!list.length) {
-      try {
-        const res2 = await axios.get(
-          `https://api.subsource.net/api/v1/subtitles/movie/${movieId}?lang=arabic,english`,
-          { headers: getHeaders(apiKey), timeout: 7000 }
-        );
-        const items = res2.data?.data || res2.data?.subtitles || [];
-        logs.attempts.push({ type: 'GET /subtitles/movie/:id', status: res2.status, count: items.length });
-        if (items.length > 0) list = items;
-      } catch (e) {
-        logs.attempts.push({ type: 'GET /subtitles/movie/:id', error: e.response?.status || e.message });
-      }
-    }
-
-    logs.totalSubsFound = list.length;
-    if (debugMode) return { success: true, logs, subsCount: list.length, sample: list[0] || null };
-
+    let list = getRes.data?.data || getRes.data?.subtitles || [];
     if (!list.length) return [];
+
+    // تصفية اللغات: عربية وإنكليزية فقط
+    list = list.filter(item => {
+      const l = (item.language || item.lang || '').toLowerCase();
+      return l.includes('arab') || l === 'ar' || l.includes('eng') || l === 'en';
+    });
 
     // تصفية أرقام الحلقات للمسلسلات
     if (season && episode) {
@@ -124,8 +75,8 @@ async function getSubSource({ title, imdbId, season, episode, type, apiKey }, de
         if (item.season && item.episode) {
           return parseInt(item.season, 10) === sNum && parseInt(item.episode, 10) === eNum;
         }
-        const name = item.release_name || item.releaseName || item.name || '';
-        return epRegex.test(name);
+        const relName = (Array.isArray(item.releaseInfo) ? item.releaseInfo[0] : '') || item.release_name || item.name || '';
+        return epRegex.test(relName);
       });
 
       if (filtered.length > 0) {
@@ -134,15 +85,17 @@ async function getSubSource({ title, imdbId, season, episode, type, apiKey }, de
     }
 
     return list.map(item => {
-      const subId = item.subId || item.subtitleId || item.id || item.file;
-      const lang = (item.language || item.lang || '').toLowerCase();
-      const name = item.release_name || item.releaseName || item.name || '';
-      const isAss = name.toLowerCase().endsWith('.ass');
+      const subId = item.subtitleId || item.subId || item.id;
+      const langRaw = (item.language || item.lang || '').toLowerCase();
+      const isArabic = langRaw.includes('arab') || langRaw === 'ar';
+      
+      const relName = (Array.isArray(item.releaseInfo) ? item.releaseInfo[0] : '') || item.release_name || item.name || '';
+      const isAss = relName.toLowerCase().endsWith('.ass');
 
       return {
         id: `subsource_${subId}`,
         url: `subsource://${subId}?key=${encodeURIComponent(apiKey)}`,
-        lang: lang.includes('arab') || lang.includes('ar') ? 'ara' : 'eng',
+        lang: isArabic ? 'ara' : 'eng',
         format: isAss ? 'ass' : 'srt',
         _source: 'subsource',
         _priority: 2
@@ -166,7 +119,7 @@ async function fetchSubSourceBuffer(customUrl) {
 
     const res = await axios.post(
       'https://api.subsource.net/api/v1/subtitles/download',
-      { subId: subId },
+      { subId: subId, subtitleId: subId },
       { headers: getHeaders(apiKey), timeout: 10000 }
     );
 
