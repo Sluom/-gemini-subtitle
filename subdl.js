@@ -28,6 +28,29 @@ function buildSubDLStremConfig(apiKey) {
   }
 }
 
+// دالة فحص ذكية تكشف إذا كانت ترجمة SubDL بصيغة ASS
+function checkIsAssFormat(item) {
+  const checkTargets = [
+    item.sub_format,
+    item.format,
+    item.type,
+    item.release_name,
+    item.name,
+    item.url,
+    item.file_name,
+    item.author
+  ].filter(Boolean).map(v => String(v).toLowerCase());
+
+  return checkTargets.some(str => 
+    str.includes('.ass') || 
+    str.includes('.ssa') || 
+    str === 'ass' || 
+    str === 'ssa' ||
+    str.includes('styled') ||
+    str.includes('[ass]')
+  );
+}
+
 async function fetchSubDLOfficial(imdbId, season, episode, type, apiKey) {
   if (!apiKey || !imdbId || !imdbId.startsWith('tt')) return [];
 
@@ -54,19 +77,22 @@ async function fetchSubDLOfficial(imdbId, season, episode, type, apiKey) {
 
     return res.data.subtitles.map(item => {
       const langRaw = (item.lang || item.language || 'Arabic').toLowerCase();
-      const isAr = langRaw.startsWith('ar');
+      const isAr = langRaw.startsWith('ar') || langRaw === 'ara';
       const releaseName = item.release_name || item.name || '';
-      const isAss = releaseName.toLowerCase().endsWith('.ass') || releaseName.toLowerCase().includes('.ass');
+      const isAss = checkIsAssFormat(item);
 
       let dlUrl = item.url || '';
       if (dlUrl && !dlUrl.startsWith('http')) {
         dlUrl = `https://dl.subdl.com${dlUrl.startsWith('/') ? '' : '/'}${dlUrl}`;
       }
 
+      const cleanFormat = isAss ? 'ass' : 'srt';
+
       return {
         url: dlUrl,
         lang: isAr ? 'ara' : 'eng',
-        format: isAss ? 'ass' : 'srt',
+        format: cleanFormat,
+        ext: cleanFormat,
         fileName: releaseName,
         origName: releaseName || 'SubDL Official',
         _source: 'subdl',
@@ -105,17 +131,19 @@ async function fetchSubDLStremTop(imdbId, season, episode, type, apiKey) {
     return list.map(item => {
       const langRaw = (item.lang || 'ara').toLowerCase();
       const isArabic = langRaw.startsWith('ar') || langRaw === 'ara';
-      const isAss = (item.url || '').toLowerCase().includes('.ass') || (item.id || '').toLowerCase().includes('.ass');
+      const isAss = checkIsAssFormat(item);
+      const cleanFormat = isAss ? 'ass' : 'srt';
 
       return {
         url: item.url,
         lang: isArabic ? 'ara' : 'eng',
-        format: isAss ? 'ass' : 'srt',
+        format: cleanFormat,
+        ext: cleanFormat,
         fileName: item.id || '',
         origName: item.id || 'SubDL Strem',
         _source: 'subdl',
         _isZip: false,
-        _priority: isArabic ? 2 : 3
+        _priority: isArabic ? (isAss ? 0 : 2) : 3
       };
     }).filter(s => s.url);
   } catch (err) {
@@ -138,17 +166,19 @@ async function fetchSubDLMirror(imdbId, season, episode, type) {
 
     return (r.data?.subtitles || []).map(s => {
       const isArabic = (s.lang || 'ara').toLowerCase().startsWith('ar');
-      const isAss = (s.url || '').toLowerCase().includes('.ass') || (s.title || '').toLowerCase().includes('.ass');
+      const isAss = checkIsAssFormat(s);
+      const cleanFormat = isAss ? 'ass' : 'srt';
 
       return {
         url: s.url,
         lang: isArabic ? 'ara' : 'eng',
-        format: isAss ? 'ass' : 'srt',
+        format: cleanFormat,
+        ext: cleanFormat,
         fileName: s.title || s.name || '',
         origName: s.title || s.name || 'SubDL Mirror',
         _source: 'subdl',
         _isZip: false,
-        _priority: 3
+        _priority: isArabic ? (isAss ? 0 : 2) : 3
       };
     });
   } catch (e) {
