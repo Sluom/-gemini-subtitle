@@ -7,7 +7,7 @@ function getAxiosConfig(extraHeaders = {}) {
       'Accept': 'application/json',
       ...extraHeaders
     },
-    timeout: 8000
+    timeout: 9000
   };
 }
 
@@ -28,28 +28,40 @@ async function fetchOpenSubtitlesOfficial(imdbId, season, episode, apiKey) {
     const res = await axios.get(url, getAxiosConfig({ 'Api-Key': apiKey.trim() }));
     const data = res.data?.data || [];
 
-    return data.map(item => {
+    const subs = [];
+
+    data.forEach(item => {
       const attr = item.attributes || {};
-      const file = (attr.files && attr.files[0]) || {};
+      const files = attr.files || [];
       const lang = (attr.language || 'ara').toLowerCase();
       const isAr = lang.startsWith('ar');
 
-      const realFileName = file.file_name || attr.release || '';
-      const isAss = realFileName.toLowerCase().endsWith('.ass') || 
-                    realFileName.toLowerCase().endsWith('.ssa') || 
-                    (attr.format || '').toLowerCase() === 'ass';
+      files.forEach(file => {
+        const rawName = (file.file_name || attr.release || '').toLowerCase();
+        let detectedFormat = 'srt';
 
-      return {
-        url: file.file_id ? `https://api.opensubtitles.com/api/v1/download/${file.file_id}` : attr.url,
-        lang: isAr ? 'ara' : 'eng',
-        format: isAss ? 'ass' : 'srt',
-        ext: isAss ? 'ass' : 'srt',
-        fileName: realFileName,
-        origName: realFileName || 'OpenSubtitles Official',
-        _source: 'opensubtitles-api',
-        _priority: isAr ? (isAss ? 0 : 1) : 3
-      };
-    }).filter(s => s.url);
+        if (rawName.endsWith('.ass') || rawName.endsWith('.ssa') || (attr.format || '').toLowerCase() === 'ass') {
+          detectedFormat = 'ass';
+        } else if (rawName.endsWith('.vtt') || (attr.format || '').toLowerCase() === 'vtt') {
+          detectedFormat = 'vtt';
+        }
+
+        if (file.file_id) {
+          subs.push({
+            url: `https://api.opensubtitles.com/api/v1/download/${file.file_id}`,
+            lang: isAr ? 'ara' : 'eng',
+            format: detectedFormat,
+            ext: detectedFormat,
+            fileName: file.file_name || attr.release || '',
+            origName: file.file_name || attr.release || 'OpenSubtitles Official',
+            _source: 'opensubtitles-api',
+            _priority: isAr ? (detectedFormat === 'ass' ? 0 : 1) : 3
+          });
+        }
+      });
+    });
+
+    return subs;
   } catch (e) {
     return [];
   }
@@ -68,7 +80,8 @@ async function fetchOpenSubtitlesMirror(imdbId, season, episode, type) {
     const subs = res.data?.subtitles || [];
     return subs.map(s => {
       const isArabic = (s.lang || 'ara').toLowerCase().startsWith('ar');
-      const isAss = (s.url || '').toLowerCase().includes('.ass') || (s.title || '').toLowerCase().includes('.ass');
+      const checkText = `${s.url || ''} ${s.title || ''} ${s.name || ''}`.toLowerCase();
+      const isAss = checkText.includes('.ass') || checkText.includes('.ssa');
 
       return {
         url: s.url,
