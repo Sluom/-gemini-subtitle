@@ -10,7 +10,6 @@ const { getSubDL } = require('./subdl');
 const { getSubSource, fetchSubSourceBuffer } = require('./subsource');
 const { getAnimeSubtitles } = require('./anime');
 
-// استدعاء آمن لـ Wyzie بدون كسر السيرفر إذا لم يكن الملف موجوداً
 let getWyzie = null;
 try {
   const wyzieMod = require('./wyzie');
@@ -128,7 +127,6 @@ function findEpisodeInZip(zip, episode) {
   return subEntries[0] || null;
 }
 
-// دالة فحص متعددة الطبقات لتحديد نوع الصيغة بدقة
 function detectFormat(s) {
   const checkStr = [
     s.format,
@@ -251,6 +249,36 @@ app.post('/api/test-key', async (req, res) => {
   } catch (err) {
     const errorDetail = err.response?.data?.error?.message || err.response?.data?.message || err.message || 'Service unavailable';
     return res.json({ success: false, message: `فشل الفحص: ${errorDetail} ❌`, status: 'error' });
+  }
+});
+
+// مسار الفحص والتشخيص المباشر لـ SubSource
+app.get(['/api/debug-subsource', '/:config/api/debug-subsource'], async (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Headers', '*');
+  res.setHeader('Content-Type', 'application/json');
+
+  const config = parseConfig(req);
+  const imdbId = req.query.id || 'tt0111161';
+
+  try {
+    const media = await resolveMedia(imdbId, 'movie');
+    const diagnostic = await getSubSource({
+      title: media.title || '',
+      imdbId: media.imdbId || imdbId,
+      apiKey: config.subsourceKey
+    }, true);
+
+    res.json({
+      serverConfigStatus: {
+        hasSubSourceKey: !!config.subsourceKey,
+        keyLength: config.subsourceKey ? config.subsourceKey.length : 0
+      },
+      mediaResolved: media,
+      subsourceDiagnostic: diagnostic
+    });
+  } catch (e) {
+    res.json({ error: e.message });
   }
 });
 
@@ -529,13 +557,12 @@ app.get([
     let title = media.title;
     const mediaType = media.type || type;
 
-    // إذا لم يتوفر الاسم الصافي نستخدم كود الـ IMDb كبديل حتى لا تتوقف المواقع المعتمدة عليه
     if (!title && imdbId) {
       title = imdbId;
     }
 
     const tasks = [
-      getAnimeSubtitles(targetId).catch(() => [])
+      getAnimeSubtitles(targetId, episode, config.jimakuKey, title).catch(() => [])
     ];
 
     if (imdbId) {
@@ -625,7 +652,6 @@ app.get([
       } else if (s.url.startsWith('subsource://')) {
         finalUrl = `${baseUrl}/stream-subsource.srt?data=${encodeURIComponent(s.url)}`;
       } else if (rawSource.includes('opensubtitles') || s.url.includes('opensubtitles.com')) {
-        // توجيه روابط OpenSubtitles عبر بروكسي السيرفر لضمان إرسال الترويسات ومنع أخطاء 401 و 403
         finalUrl = `${baseUrl}/stream-os.srt?url=${encodeURIComponent(s.url)}&key=${encodeURIComponent(config.openSubtitlesKey || '')}&format=${ext.toLowerCase()}`;
       }
 
@@ -663,7 +689,6 @@ app.get([
   }
 });
 
-// بروكسي OpenSubtitles لحل مشاكل الترويسات والصلاحيات وفك الضغط
 app.all(['/stream-os', '/stream-os.srt'], async (req, res) => {
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   const subUrl = req.query.url;
