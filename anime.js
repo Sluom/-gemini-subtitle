@@ -7,6 +7,20 @@ function getAnimeHeaders() {
   };
 }
 
+async function getKitsuIdFromImdb(imdbId) {
+  if (!imdbId || !imdbId.startsWith('tt')) return null;
+  try {
+    const res = await axios.get(`https://kitsu.io/api/edge/mappings?filter[externalSite]=imdb&filter[externalId]=${imdbId}&include=item`, {
+      headers: getAnimeHeaders(),
+      timeout: 6000
+    });
+    const item = res.data?.included?.[0] || res.data?.data?.[0];
+    return item ? item.id : null;
+  } catch (e) {
+    return null;
+  }
+}
+
 async function searchKitsuIdByTitle(title) {
   if (!title) return null;
   try {
@@ -22,61 +36,6 @@ async function searchKitsuIdByTitle(title) {
   }
 }
 
-async function getKitsuAnime(kitsuId) {
-  if (!kitsuId) return null;
-  try {
-    const res = await axios.get(`https://kitsu.io/api/edge/anime/${kitsuId}`, {
-      headers: getAnimeHeaders(),
-      timeout: 6000
-    });
-    const attr = res.data?.data?.attributes;
-    if (!attr) return null;
-    return {
-      canonicalTitle: attr.canonicalTitle,
-      titles: attr.titles || {},
-      slug: attr.slug
-    };
-  } catch (e) {
-    return null;
-  }
-}
-
-async function getJimakuSubtitles(query, apiKey) {
-  if (!apiKey || !query) return [];
-  try {
-    const res = await axios.get(`https://jimaku.cc/api/entries/search?query=${encodeURIComponent(query)}`, {
-      headers: { 'Authorization': apiKey, ...getAnimeHeaders() },
-      timeout: 6000
-    });
-
-    const entries = res.data?.data || res.data || [];
-    if (!entries.length) return [];
-
-    const firstEntry = entries[0];
-    const filesRes = await axios.get(`https://jimaku.cc/api/entries/${firstEntry.id}/files`, {
-      headers: { 'Authorization': apiKey, ...getAnimeHeaders() },
-      timeout: 6000
-    });
-
-    const files = filesRes.data?.data || filesRes.data || [];
-    return files.map((file, idx) => {
-      const fileName = (file.name || '').toLowerCase();
-      const isAss = fileName.endsWith('.ass');
-      const isArabic = fileName.includes('ar') || fileName.includes('ara') || fileName.includes('arabic');
-      return {
-        id: `jimaku_${file.id || idx}`,
-        url: file.url || file.download_url,
-        lang: isArabic ? 'ara' : 'jpn',
-        format: isAss ? 'ass' : 'srt',
-        _source: 'jimaku',
-        _priority: isArabic ? 1 : 3
-      };
-    }).filter(f => f.url);
-  } catch (e) {
-    return [];
-  }
-}
-
 async function getAnimeToshoSubtitles(kitsuId, episode) {
   if (!kitsuId) return [];
   try {
@@ -88,17 +47,18 @@ async function getAnimeToshoSubtitles(kitsuId, episode) {
 
     const items = res.data || [];
     const subs = [];
-
     const epRegex = new RegExp(`(?:e|ep|episode|[._ -]|\\[|\\()0*${epNum}(?:[\\]\\)\\s._-]|$|v\\d+)`, 'i');
 
     for (const item of items) {
       const title = (item.title || '').toLowerCase();
-      
+
       if (epRegex.test(title) && Array.isArray(item.attachments) && item.attachments.length) {
         for (const att of item.attachments) {
           const attName = (att.filename || '').toLowerCase();
-          if (attName.endsWith('.ass') || attName.endsWith('.srt') || attName.endsWith('.vtt')) {
-            const isAss = attName.endsWith('.ass');
+          const isAss = attName.endsWith('.ass');
+          const isSrt = attName.endsWith('.srt');
+
+          if (isAss || isSrt) {
             const isArabic = attName.includes('ara') || attName.includes('arabic') || attName.includes('ar.');
             
             subs.push({
@@ -107,7 +67,7 @@ async function getAnimeToshoSubtitles(kitsuId, episode) {
               lang: isArabic ? 'ara' : 'eng',
               format: isAss ? 'ass' : 'srt',
               _source: 'animetosho',
-              _priority: isArabic ? 1 : 3
+              _priority: isArabic ? (isAss ? 0 : 1) : 3
             });
           }
         }
@@ -120,17 +80,13 @@ async function getAnimeToshoSubtitles(kitsuId, episode) {
 }
 
 async function getAnimeSubtitles(targetId, episodeNum = 1, jimakuKey = '', mediaTitle = '') {
-  if (!targetId && !mediaTitle) return [];
-
   let target = targetId;
   let episode = episodeNum;
-  let key = jimakuKey;
   let title = mediaTitle;
 
   if (typeof targetId === 'object' && targetId !== null) {
     target = targetId.targetId || targetId.id || '';
     episode = targetId.episode || episodeNum;
-    key = targetId.jimakuKey || targetId.apiKey || jimakuKey;
     title = targetId.title || mediaTitle;
   }
 
@@ -140,33 +96,18 @@ async function getAnimeSubtitles(targetId, episodeNum = 1, jimakuKey = '', media
     const parts = target.split(':');
     kitsuId = parts[1];
     if (parts[2]) episode = parts[2];
-  } else if (title) {
+  } else if (typeof target === 'string' && target.startsWith('tt')) {
+    kitsuId = await getKitsuIdFromImdb(target);
+  }
+
+  if (!kitsuId && title) {
     kitsuId = await searchKitsuIdByTitle(title);
   }
 
-  const tasks = [];
+  if (!kitsuId) return [];
 
-  if (kitsuId) {
-    tasks.push(getAnimeToshoSubtitles(kitsuId, episode));
-
-    if (key) {
-      tasks.push(
-        getKitsuAnime(kitsuId).then(kitsuData => {
-          if (kitsuData) {
-            const query = kitsuData.canonicalTitle || kitsuData.slug;
-            return getJimakuSubtitles(query, key);
-          }
-          return [];
-        })
-      );
-    }
-  }
-
-  const settled = await Promise.allSettled(tasks);
-  return settled
-    .filter(r => r.status === 'fulfilled')
-    .flatMap(r => r.value)
-    .filter(s => s && s.url);
+  const results = await getAnimeToshoSubtitles(kitsuId, episode);
+  return results.filter(s => s && s.url);
 }
 
 module.exports = { getAnimeSubtitles };
