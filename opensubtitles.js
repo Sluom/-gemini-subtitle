@@ -14,7 +14,7 @@ function getAxiosConfig(apiKey) {
   return { headers, timeout: TIMEOUT };
 }
 
-// فحص دقيق لملفات ASS و SSA
+// فحص دقيق وشامل لملفات الـ ASS و SSA
 function checkIsAss(file, attr) {
   const fileName = (file?.file_name || '').toLowerCase();
   const release = (attr?.release || '').toLowerCase();
@@ -31,7 +31,7 @@ function checkIsAss(file, attr) {
   );
 }
 
-// السحب عبر الـ API الرسمي الجديد بالمفتاح
+// السحب عبر الـ API الرسمي بالمفتاح (الجديد)
 async function fetchOfficial(imdbId, season, episode, type, apiKey) {
   if (!apiKey || !imdbId || !imdbId.startsWith('tt')) return [];
 
@@ -48,8 +48,7 @@ async function fetchOfficial(imdbId, season, episode, type, apiKey) {
       params.set('imdb_id', cleanNumericId);
     }
 
-    const url = `https://api.opensubtitles.com/api/v1/subtitles?${params.toString()}`;
-    const res = await axios.get(url, getAxiosConfig(apiKey));
+    const res = await axios.get(`https://api.opensubtitles.com/api/v1/subtitles?${params.toString()}`, getAxiosConfig(apiKey));
     const allRawItems = Array.isArray(res.data?.data) ? res.data.data : [];
     
     const results = [];
@@ -82,55 +81,68 @@ async function fetchOfficial(imdbId, season, episode, type, apiKey) {
   }
 }
 
-// السحب عبر الـ API القديم السحري (نفس طريقة SubSense تماماً)
-async function fetchLegacyApi(imdbId, season, episode) {
-  if (!imdbId || !imdbId.startsWith('tt')) return [];
-  const numericId = imdbId.replace(/^tt/, '').replace(/^0+/, '');
-  
-  let url = `https://rest.opensubtitles.org/search/imdbid-${numericId}`;
-  if (season != null && episode != null) {
-    url = `https://rest.opensubtitles.org/search/episode-${episode}/imdbid-${numericId}/season-${season}/sublanguageid-ara`;
-  } else {
-    url += `/sublanguageid-ara`;
-  }
-
+// دالة داخلية لجلب بيانات السيرفر القديم باستخدام Fetch لتخطي الحظر
+async function fetchLegacyData(url) {
   try {
-    const res = await axios.get(url, {
-      headers: { 
-        'X-User-Agent': 'VLSub 0.10.3', // المفتاح السري لتخطي الحماية
-        'Accept': 'application/json' 
-      },
-      timeout: 8000
+    const response = await fetch(url, {
+      headers: {
+        'User-Agent': 'VLSub 0.10.3', // فرض صارم للهيدر لتخطي الحظر
+        'X-User-Agent': 'VLSub 0.10.3',
+        'Accept': 'application/json'
+      }
     });
-    
-    if (!Array.isArray(res.data)) return [];
-    
+
+    if (!response.ok) return [];
+    const data = await response.json();
+    if (!Array.isArray(data)) return [];
+
     const results = [];
-    res.data.forEach(entry => {
-       const downloadLink = entry.SubDownloadLink;
-       if (!downloadLink) return; // يحتوي رابط gz مباشر
-       
-       const format = (entry.SubFormat || '').toLowerCase();
-       const rawName = entry.SubFileName || entry.MovieReleaseName || 'OpenSubtitles Legacy';
-       const isAss = format === 'ass' || format === 'ssa' || rawName.toLowerCase().includes('.ass') || rawName.toLowerCase().includes('.ssa');
-       const finalExt = isAss ? 'ass' : 'srt';
-       
-       results.push({
-         url: downloadLink, 
-         lang: 'ara',
-         format: finalExt,
-         ext: finalExt,
-         subFormat: isAss ? 'ssa' : 'srt',
-         fileName: rawName,
-         origName: rawName,
-         _source: 'opensubtitles', // تم تمريره هكذا ليقوم index.js بفك ضغط gz تلقائياً
-         _priority: isAss ? 0 : 2
-       });
+    data.forEach(entry => {
+      const downloadLink = entry.SubDownloadLink;
+      if (!downloadLink) return;
+
+      const format = (entry.SubFormat || '').toLowerCase();
+      const rawName = entry.SubFileName || entry.MovieReleaseName || 'OpenSubtitles Legacy';
+      const isAss = format === 'ass' || format === 'ssa' || rawName.toLowerCase().includes('.ass') || rawName.toLowerCase().includes('.ssa');
+      const finalExt = isAss ? 'ass' : 'srt';
+
+      results.push({
+        url: downloadLink,
+        lang: 'ara',
+        format: finalExt,
+        ext: finalExt,
+        subFormat: isAss ? 'ssa' : 'srt',
+        fileName: rawName,
+        origName: rawName,
+        _source: 'opensubtitles',
+        _priority: isAss ? 0 : 2
+      });
     });
     return results;
   } catch (e) {
     return [];
   }
+}
+
+// السحب عبر الـ API القديم السحري (نفس SubSense)
+async function fetchLegacyApi(imdbId, season, episode) {
+  if (!imdbId || !imdbId.startsWith('tt')) return [];
+  const numericId = imdbId.replace(/^tt/, '').replace(/^0+/, '');
+  
+  let primaryUrl = `https://rest.opensubtitles.org/search/imdbid-${numericId}/sublanguageid-ara`;
+  if (season != null && episode != null) {
+    primaryUrl = `https://rest.opensubtitles.org/search/episode-${episode}/imdbid-${numericId}/season-${season}/sublanguageid-ara`;
+  }
+
+  let results = await fetchLegacyData(primaryUrl);
+
+  // ضربة احتياطية للأنمي: إذا لم يجد نتائج بالحلقة، يبحث بالعمل ككل
+  if (results.length === 0 && season != null) {
+    const fallbackUrl = `https://rest.opensubtitles.org/search/imdbid-${numericId}/sublanguageid-ara`;
+    results = await fetchLegacyData(fallbackUrl);
+  }
+
+  return results;
 }
 
 // السحب الاحتياطي عبر سيرفر Stremio
@@ -182,11 +194,11 @@ async function getOpenSubtitles({ imdbId, season, episode, type, apiKey }) {
   const tasks = [];
   
   if (apiKey) {
-    tasks.push(fetchOfficial(imdbId, season, episode, type, apiKey)); // API الجديد
+    tasks.push(fetchOfficial(imdbId, season, episode, type, apiKey)); 
   }
   
-  tasks.push(fetchLegacyApi(imdbId, season, episode)); // API SubSense القديم
-  tasks.push(fetchMirror(imdbId, season, episode, type)); // بروكسي Stremio
+  tasks.push(fetchLegacyApi(imdbId, season, episode));
+  tasks.push(fetchMirror(imdbId, season, episode, type));
 
   const settled = await Promise.allSettled(tasks);
   return settled
