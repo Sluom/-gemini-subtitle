@@ -14,7 +14,7 @@ function getAxiosConfig(apiKey) {
   return { headers, timeout: TIMEOUT };
 }
 
-// فحص دقيق وشامل لملفات الـ ASS و SSA
+// فحص دقيق لملفات الـ ASS و SSA
 function checkIsAss(file, attr) {
   const fileName = (file?.file_name || '').toLowerCase();
   const release = (attr?.release || '').toLowerCase();
@@ -81,7 +81,7 @@ async function fetchOfficial(imdbId, season, episode, type, apiKey) {
   }
 }
 
-// دالة داخلية لجلب بيانات السيرفر القديم بدون تخريب الروابط
+// دالة جلب بيانات السيرفر القديم (بروابط gz الأصلية لتجنب الصفحات الفارغة)
 async function fetchLegacyData(url) {
   try {
     const response = await fetch(url, {
@@ -106,9 +106,8 @@ async function fetchLegacyData(url) {
       const isAss = format === 'ass' || format === 'ssa' || rawName.toLowerCase().includes('.ass') || rawName.toLowerCase().includes('.ssa');
       const finalExt = isAss ? 'ass' : 'srt';
 
-      // الرابط يرسل كما هو (حتى لو انتهى بـ .gz) لأن الـ index.js سيفك الضغط بذكاء
       results.push({
-        url: downloadLink,
+        url: downloadLink, // الرابط الأصلي بدون أي تعديل لضمان عمل التحميل
         lang: 'ara',
         format: finalExt,
         ext: finalExt,
@@ -125,7 +124,7 @@ async function fetchLegacyData(url) {
   }
 }
 
-// السحب عبر الـ API القديم
+// السحب عبر الـ API القديم (بدون جلب كل المسلسل بشكل عشوائي)
 async function fetchLegacyApi(imdbId, season, episode) {
   if (!imdbId || !imdbId.startsWith('tt')) return [];
   const numericId = imdbId.replace(/^tt/, '').replace(/^0+/, '');
@@ -135,14 +134,8 @@ async function fetchLegacyApi(imdbId, season, episode) {
     primaryUrl = `https://rest.opensubtitles.org/search/episode-${episode}/imdbid-${numericId}/season-${season}/sublanguageid-ara`;
   }
 
-  let results = await fetchLegacyData(primaryUrl);
-
-  if (results.length === 0 && season != null) {
-    const fallbackUrl = `https://rest.opensubtitles.org/search/imdbid-${numericId}/sublanguageid-ara`;
-    results = await fetchLegacyData(fallbackUrl);
-  }
-
-  return results;
+  // تم حذف الفلتر الاحتياطي اللي كان يجلب كل السلسلة ويسبب الـ 200 نتيجة
+  return await fetchLegacyData(primaryUrl);
 }
 
 // السحب الاحتياطي عبر سيرفر Stremio
@@ -172,7 +165,7 @@ async function fetchMirror(imdbId, season, episode, type) {
         const format = isAss ? 'ass' : 'srt';
 
         return {
-          url: s.url,
+          url: s.url, // الرابط الأصلي بدون أي تعديل لضمان عمل التحميل
           lang: 'ara',
           format: format,
           ext: format,
@@ -202,18 +195,19 @@ async function getOpenSubtitles({ imdbId, season, episode, type, apiKey }) {
     .flatMap(r => r.value)
     .filter(s => s && s.url);
 
-  // نظام فلترة وتصفية صارم لمنع تكرار نفس الترجمة من السيرفرات الثلاثة
+  // نظام فلترة لمنع تكرار نفس الترجمة من السيرفرات الثلاثة
   const uniqueSubs = [];
   const seenIds = new Set();
 
   for (const sub of allSubs) {
     let fileId = sub.url;
-    // استخراج المعرف الرقمي الصافي للترجمة سواء كان من API جديد أو قديم
+    
+    // استخراج رقم الملف لضمان عدم تكراره
     const osMatch = sub.url.match(/os:\/\/(\d+)/);
     const dlMatch = sub.url.match(/\/file\/(\d+)/);
     
-    if (osMatch) fileId = osMatch[1];
-    else if (dlMatch) fileId = dlMatch[1];
+    if (osMatch) fileId = `os-${osMatch[1]}`;
+    else if (dlMatch) fileId = `dl-${dlMatch[1]}`;
 
     if (seenIds.has(fileId)) continue;
     
@@ -221,8 +215,7 @@ async function getOpenSubtitles({ imdbId, season, episode, type, apiKey }) {
     uniqueSubs.push(sub);
   }
 
-  // إرجاع كافة الترجمات الفعالة بدون أي قيود أو قطع للعدد
-  return uniqueSubs;
+  return uniqueSubs; // كل الترجمات الفعالة بدون قطع أو تحديد للعدد
 }
 
 module.exports = { getOpenSubtitles };
