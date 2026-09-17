@@ -10,7 +10,6 @@ function getHeaders() {
   };
 }
 
-// دالة فحص واستبعاد ترجمات اللوحات فقط
 function isForcedOrSignsOnly(trackName = '') {
   const name = trackName.toLowerCase();
   return (
@@ -21,7 +20,6 @@ function isForcedOrSignsOnly(trackName = '') {
   );
 }
 
-// سحب الترجمات من تفاصيل تورنت AnimeTosho المباشرة
 async function fetchAnimeToshoSubtitles(title, episode) {
   if (!title) return [];
 
@@ -30,7 +28,6 @@ async function fetchAnimeToshoSubtitles(title, episode) {
   const query = `${cleanTitle} ${epNum < 10 ? '0' + epNum : epNum}`;
 
   try {
-    // 1. البحث في سورس AnimeTosho المباشر
     const searchUrl = `https://animetosho.org/search?q=${encodeURIComponent(query)}&json=1`;
     const res = await axios.get(searchUrl, { headers: getHeaders(), timeout: TIMEOUT });
     const entries = Array.isArray(res.data) ? res.data : [];
@@ -39,15 +36,12 @@ async function fetchAnimeToshoSubtitles(title, episode) {
 
     const results = [];
     const seenAttachments = new Set();
-
-    // فحص أول 3 إصدارات متطابقة (أعلى جودة وسرعة استجابة)
     const topEntries = entries.slice(0, 3);
 
     for (const entry of topEntries) {
       if (!entry.id) continue;
 
       try {
-        // سحب تفاصيل الملفات والمرفقات المدمجة بالتورنت
         const detailUrl = `https://animetosho.org/view/${entry.id}?json=1`;
         const detailRes = await axios.get(detailUrl, { headers: getHeaders(), timeout: 4000 });
         const detail = detailRes.data || {};
@@ -63,7 +57,6 @@ async function fetchAnimeToshoSubtitles(title, episode) {
             const lang = (sub.info?.lang || sub.lang || '').toLowerCase();
             const isArabic = lang === 'ara' || lang === 'ar' || lang === 'arabic';
 
-            // إذا أردت استخراج العربي فقط أو المتوفر عموماً
             if (!isArabic) continue;
 
             const trackName = sub.info?.name || sub.name || '';
@@ -75,11 +68,11 @@ async function fetchAnimeToshoSubtitles(title, episode) {
             const isAss = codec === 'ass' || codec === 'ssa' || (sub.filename || '').endsWith('.ass');
             const format = isAss ? 'ass' : 'srt';
 
-            // رابط التحميل المباشر لمرفق الترجمة الخام بدون تحويله لـ VTT
-            const downloadUrl = `https://animetosho.org/storage/attachment/${sub.id}`;
+            // توجيه الرابط الخام مباشرة إلى سيرفرنا بـ index.js لفك الضغط وتعديل الترميز
+            const rawUrl = `https://animetosho.org/storage/attachment/${sub.id}`;
 
             results.push({
-              url: downloadUrl,
+              url: rawUrl,
               lang: 'ara',
               format: format,
               ext: format,
@@ -99,7 +92,6 @@ async function fetchAnimeToshoSubtitles(title, episode) {
   }
 }
 
-// دمج البحث مع Jimaku في حال توفر المفتاح
 async function getAnimeSubtitles(targetId, episode, jimakuKey, title) {
   const subs = [];
 
