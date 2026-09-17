@@ -33,14 +33,17 @@ const MANIFEST = {
   resources: ['subtitles'],
   types: ['movie', 'series', 'anime'],
   idPrefixes: ['tt', 'kitsu'],
-  catalogs: []
+  catalogs: [],
+  behaviorHints: {
+    configurable: true,
+    configurationRequired: false
+  }
 };
 
 function fixArabicEncoding(buffer) {
   if (!buffer || !Buffer.isBuffer(buffer)) return buffer;
-  if (buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4b) return buffer; // تخطي ملفات ZIP
+  if (buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4b) return buffer;
 
-  // حل سحري لشاشة ASS الفارغة: كشف وتحويل ترميز UTF-16 (المستخدم بكثرة في الأنمي) إلى UTF-8
   if (buffer.length >= 2 && buffer[0] === 0xff && buffer[1] === 0xfe) {
     try {
       const decodedUtf16 = iconv.decode(buffer, 'utf16-le');
@@ -149,7 +152,6 @@ function findEpisodeInZip(zip, episode) {
   return defaultAss || subEntries[0] || null;
 }
 
-// دالة الكشف الموحدة: تدمج ass و ssa تحت مسمى 'ssa' حصراً لإرضاء Nuvio
 function detectFormat(s) {
   const formatVal = (s.format || '').toLowerCase();
   const subFormatVal = (s.subFormat || s.SubFormat || '').toLowerCase();
@@ -293,9 +295,9 @@ function renderHtml(config) {
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
     body { background-color: #0b1120; color: #f1f5f9; display: flex; justify-content: center; padding: 20px 10px 40px; }
-    .container { width: 100%; max-width: 480px; display: flex; flex-direction: column; gap: 16px; }
-    .main-title { text-align: center; color: #38bdf8; font-size: 1.35rem; font-weight: 700; margin-bottom: 6px; }
-    .section-title { text-align: center; color: #94a3b8; font-size: 0.95rem; font-weight: 600; margin: 12px 0 6px; }
+    .container { width: 100%; max-width: 480px; display: flex; flex-direction: column; gap: 14px; }
+    .main-title { text-align: center; color: #38bdf8; font-size: 1.35rem; font-weight: 700; margin-bottom: 4px; }
+    .section-title { text-align: center; color: #94a3b8; font-size: 0.95rem; font-weight: 600; margin: 12px 0 4px; }
     .card { background-color: #162032; border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 8px; border: 1px solid #1e293b; }
     .card-header { display: flex; justify-content: space-between; align-items: center; }
     .card-label { font-size: 0.88rem; font-weight: 600; color: #e2e8f0; }
@@ -311,7 +313,7 @@ function renderHtml(config) {
     .status-box.error { display: block; color: #f87171; background: rgba(248, 113, 113, 0.1); border: 1px solid rgba(248, 113, 113, 0.2); }
     .status-box.warn { display: block; color: #facc15; background: rgba(250, 204, 21, 0.1); border: 1px solid rgba(250, 204, 21, 0.2); }
     .actions { display: flex; flex-direction: column; gap: 10px; margin-top: 15px; }
-    .btn-action { height: 46px; border-radius: 8px; font-size: 0.95rem; font-weight: 700; cursor: pointer; border: none; display: flex; align-items: center; justify-content: center; gap: 8px; color: #fff; }
+    .btn-action { height: 46px; border-radius: 8px; font-size: 0.95rem; font-weight: 700; cursor: pointer; border: none; display: flex; align-items: center; justify-content: center; gap: 8px; color: #fff; text-decoration: none; }
     .btn-install { background: #0284c7; }
     .btn-install:hover { background: #0369a1; }
     .btn-copy { background: #334155; border: 1px solid #475569; }
@@ -321,10 +323,124 @@ function renderHtml(config) {
 <body>
   <div class="container">
     <h1 class="main-title">إعدادات كافة مواقع ومفاتيح الترجمة</h1>
-    <!-- اختصاراً للرد تركت الواجهة مثل ما هي بالضبط بدون تغيير -->
+
+    <h2 class="section-title">🤖 محركات الذكاء الاصطناعي (الترجمة الفورية)</h2>
+
+    <div class="card">
+      <div class="card-header">
+        <span class="card-label">مفتاح Google Gemini API:</span>
+        <a href="https://aistudio.google.com/app/apikey" target="_blank" class="btn-get">احصل على المفتاح 🔗</a>
+      </div>
+      <div class="input-row">
+        <input type="text" id="geminiKey" class="input-field" placeholder="Google Gemini API Key" value="${config.geminiKey || ''}">
+        <button class="btn-check" onclick="checkKey('gemini')">فحص</button>
+      </div>
+      <div id="status-gemini" class="status-box"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <span class="card-label">مفتاح Groq API (فائق السرعة):</span>
+        <a href="https://console.groq.com/keys" target="_blank" class="btn-get">احصل على المفتاح 🔗</a>
+      </div>
+      <div class="input-row">
+        <input type="text" id="groqKey" class="input-field" placeholder="Groq API Key" value="${config.groqKey || ''}">
+        <button class="btn-check" onclick="checkKey('groq')">فحص</button>
+      </div>
+      <div id="status-groq" class="status-box"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <span class="card-label">مفتاح DeepL API:</span>
+        <a href="https://www.deepl.com/your-account/keys" target="_blank" class="btn-get">احصل على المفتاح 🔗</a>
+      </div>
+      <div class="input-row">
+        <input type="text" id="deeplKey" class="input-field" placeholder="DeepL API Key" value="${config.deeplKey || ''}">
+        <button class="btn-check" onclick="checkKey('deepl')">فحص</button>
+      </div>
+      <div id="status-deepl" class="status-box"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <span class="card-label">مفتاح OpenAI API:</span>
+        <a href="https://platform.openai.com/api-keys" target="_blank" class="btn-get">احصل على المفتاح 🔗</a>
+      </div>
+      <div class="input-row">
+        <input type="text" id="openAIKey" class="input-field" placeholder="OpenAI API Key" value="${config.openAIKey || ''}">
+        <button class="btn-check" onclick="checkKey('openai')">فحص</button>
+      </div>
+      <div id="status-openai" class="status-box"></div>
+    </div>
+
+    <h2 class="section-title">🎌 مواقع ومصادر ترجمات الأنمي التخصصية</h2>
+
+    <div class="card">
+      <div class="card-header">
+        <span class="card-label">مفتاح Jimaku.cc API (اختياري للأنمي):</span>
+        <a href="https://jimaku.cc/" target="_blank" class="btn-get">احصل على المفتاح 🔗</a>
+      </div>
+      <div class="input-row">
+        <input type="text" id="jimakuKey" class="input-field" placeholder="Jimaku API Token" value="${config.jimakuKey || ''}">
+        <button class="btn-check" onclick="checkKey('jimaku')">فحص</button>
+      </div>
+      <div id="status-jimaku" class="status-box"></div>
+    </div>
+
+    <h2 class="section-title">🌐 قواعد بيانات ومزودات الترجمة العامة</h2>
+
+    <div class="card">
+      <div class="card-header">
+        <span class="card-label">مفتاح SubSource API:</span>
+        <a href="https://subsource.net/" target="_blank" class="btn-get">احصل على المفتاح 🔗</a>
+      </div>
+      <div class="input-row">
+        <input type="text" id="subsourceKey" class="input-field" placeholder="SubSource API Key" value="${config.subsourceKey || ''}">
+        <button class="btn-check" onclick="checkKey('subsource')">فحص</button>
+      </div>
+      <div id="status-subsource" class="status-box"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <span class="card-label">مفتاح OpenSubtitles.com API:</span>
+        <a href="https://www.opensubtitles.com/en/consumers" target="_blank" class="btn-get">احصل على المفتاح 🔗</a>
+      </div>
+      <div class="input-row">
+        <input type="text" id="openSubtitlesKey" class="input-field" placeholder="OpenSubtitles API Key" value="${config.openSubtitlesKey || ''}">
+        <button class="btn-check" onclick="checkKey('opensubtitles')">فحص</button>
+      </div>
+      <div id="status-opensubtitles" class="status-box"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <span class="card-label">مفتاح SubDL API:</span>
+        <a href="https://subdl.com/panel/api" target="_blank" class="btn-get">احصل على المفتاح 🔗</a>
+      </div>
+      <div class="input-row">
+        <input type="text" id="subdlKey" class="input-field" placeholder="SubDL API Key" value="${config.subdlKey || ''}">
+        <button class="btn-check" onclick="checkKey('subdl')">فحص</button>
+      </div>
+      <div id="status-subdl" class="status-box"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <span class="card-label">مفتاح Wyzie Subs API:</span>
+        <a href="https://store.wyzie.io/" target="_blank" class="btn-get">احصل على المفتاح 🔗</a>
+      </div>
+      <div class="input-row">
+        <input type="text" id="wyzieKey" class="input-field" placeholder="Wyzie Subs API Key" value="${config.wyzieKey || ''}">
+        <button class="btn-check" onclick="checkKey('wyzie')">فحص</button>
+      </div>
+      <div id="status-wyzie" class="status-box"></div>
+    </div>
+
     <div class="actions">
-      <button class="btn-action btn-install" onclick="installAddon()">تثبيت الإضافة في Nuvio 🚀</button>
-      <button class="btn-action btn-copy" onclick="copyManifestUrl()">نسخ رابط المانيفست (Manifest URL) 📋</button>
+      <button class="btn-action btn-install" onclick="installAddon()">تثبيت الإضافة في Nuvio و Stremio 🚀</button>
+      <button id="copyBtn" class="btn-action btn-copy" style="display: none;" onclick="copyManifestUrl()">نسخ رابط المانيفست (Manifest URL) 📋</button>
     </div>
   </div>
 
@@ -387,14 +503,20 @@ function renderHtml(config) {
     function installAddon() {
       const b64 = buildConfigString();
       const host = window.location.host;
-      window.location.href = 'nuvio://' + host + '/' + b64 + '/manifest.json';
+
+      const copyBtn = document.getElementById('copyBtn');
+      if (copyBtn) {
+        copyBtn.style.display = 'flex';
+      }
+
+      window.location.href = 'stremio://' + host + '/' + b64 + '/manifest.json';
     }
 
     function copyManifestUrl() {
       const b64 = buildConfigString();
       const url = 'https://' + window.location.host + '/' + b64 + '/manifest.json';
       navigator.clipboard.writeText(url).then(() => {
-        alert('تم نسخ رابط الإضافة بنجاح! الصقه في خانة الملحقات في تطبيق Nuvio.');
+        alert('تم نسخ رابط المانيفست بنجاح! الصقه في خانة الإضافات.');
       }).catch(() => {
         prompt('انسخ الرابط يدوياً:', url);
       });
@@ -414,7 +536,16 @@ app.get(['/manifest.json', '/:config/manifest.json'], (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Headers', '*');
   res.setHeader('Content-Type', 'application/json');
-  res.json(MANIFEST);
+
+  const config = req.params.config;
+  const manifest = {
+    ...MANIFEST,
+    behaviorHints: {
+      configurable: true,
+      configurationRequired: !config
+    }
+  };
+  res.json(manifest);
 });
 
 app.get([
@@ -497,7 +628,7 @@ app.get([
 
     const formatted = allSubs.map((s) => {
       let finalUrl = s.url;
-      const ext = detectFormat(s); // ترجع دائماً 'ssa' أو 'srt' أو 'vtt'
+      const ext = detectFormat(s);
       const isAssTrack = ext === 'ssa';
       const rawSource = (s._source || '').toLowerCase();
       let siteName = 'Subtitles';
@@ -536,7 +667,7 @@ app.get([
         id: subId,
         url: finalUrl,
         lang: s.lang || 'ara',
-        format: ext, // Nuvio يستلم ssa حصراً ويتقبلها
+        format: ext,
         _priority: s._priority !== undefined ? s._priority : (isAssTrack ? 0 : 2)
       };
     });
@@ -563,7 +694,6 @@ app.get([
   }
 });
 
-// المسارات كلها تم تحديثها لتشمل .ssa حتى لا يحصل خطأ 404
 app.all(['/stream-proxy', '/stream-proxy.srt', '/stream-proxy.ass', '/stream-proxy.ssa'], async (req, res) => {
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   const targetUrl = req.query.url;
