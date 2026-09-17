@@ -13,13 +13,8 @@ function getRandomUA() {
 function buildSubDLStremConfig(apiKey) {
   const defaultPath = 'ZnptR0ozSjBGdDFXS003T1UyTHQ2bnhfLWx1b2FkNUwvQVIvaGlJbmNsdWRlLw';
   const key = (apiKey || process.env.SUBDL_API_KEY || '').trim();
-
   if (!key) return defaultPath;
-
-  if (key.length > 40 && !key.includes(' ') && !key.startsWith('fz')) {
-    return key;
-  }
-
+  if (key.length > 40 && !key.includes(' ') && !key.startsWith('fz')) return key;
   try {
     const rawConfig = `${key}/AR/hiInclude/`;
     return Buffer.from(rawConfig).toString('base64').replace(/=/g, '');
@@ -28,135 +23,109 @@ function buildSubDLStremConfig(apiKey) {
   }
 }
 
-// دالة الكشف الذكية: تعتمد الدلائل القاطعة وتخرج بصيغة ass حصراً ليفهمها المشغل
+// دالة الكشف الصريح
 function checkIsAssFormat(item) {
   const strDump = [
     item.sub_format, item.format, item.type, item.release_name,
     item.name, item.url, item.file_name, item.author, item.id
   ].filter(Boolean).join(' ').toLowerCase();
 
-  // إذا كان الرابط نفسه ينتهي بـ srt فهو srt قطعا ولا نخدع المشغل
   if (item.url && item.url.toLowerCase().endsWith('.srt')) return false;
 
-  // 1. الدلائل الصريحة لوجود ASS
   if (strDump.includes('.ass') || strDump.includes('.ssa') || strDump.includes('[ass]') || strDump.includes('styled') || /\b(ass|ssa)\b/.test(strDump)) {
     return true;
   }
-
-  // 2. فرق الأنمي المشهورة (عربية وأجنبية) لضمان الدقة وتجنب الشاشات الفارغة
-  const animeGroups = [
-    'erai', 'subsplease', 'horrible', 'judas', 'golumpa', 'ember', 'yameii', 'seadex', 'commie', 'vcb', 'nyaa', 'dame', 'mtbb',
-    'saiko', 'an-raws', 'animetok', 'msoms', 'shahiid', 'xotaku', 'an-sub', 'katsugeki', 'stardima', 'c-a', 'okanime'
-  ];
+  
+  const animeGroups = ['erai', 'subsplease', 'horrible', 'judas', 'golumpa', 'ember', 'yameii', 'seadex', 'commie', 'vcb', 'nyaa', 'dame', 'mtbb', 'saiko', 'an-raws', 'animetok', 'msoms', 'shahiid', 'xotaku', 'an-sub', 'katsugeki', 'stardima', 'c-a', 'okanime'];
   if (animeGroups.some(g => strDump.includes(g))) {
     return true;
   }
-
   return false;
+}
+
+// دالة الاستنساخ الذكي للنتائج (الفكرة الجديدة)
+function processSubDLItems(list, type, episode) {
+  return list.flatMap(item => {
+    const langRaw = (item.lang || item.language || 'Arabic').toLowerCase();
+    const isAr = langRaw.startsWith('ar') || langRaw === 'ara';
+    
+    // فلترة سريعة لإبقاء العربي فقط وتقليل الزحمة
+    if (!isAr) return [];
+
+    let dlUrl = item.url || '';
+    if (dlUrl && !dlUrl.startsWith('http')) {
+      dlUrl = `https://dl.subdl.com${dlUrl.startsWith('/') ? '' : '/'}${dlUrl}`;
+    }
+
+    const releaseName = item.release_name || item.name || item.id || 'SubDL';
+    const isAssRadar = checkIsAssFormat(item);
+
+    const results = [];
+
+    // 1. إذا الرادار متأكد 100% إنها ASS، نرسلها كـ SSA فقط
+    if (isAssRadar) {
+      results.push({
+        url: dlUrl, lang: 'ara', format: 'ssa', ext: 'ssa', subFormat: 'ssa',
+        fileName: releaseName, origName: releaseName, _source: 'subdl',
+        _isZip: !dlUrl.endsWith('.srt') && !dlUrl.endsWith('.ass'), _episode: episode || 1, _priority: 0
+      });
+    } 
+    // 2. الفكرة الجديدة: إذا العمل أنمي والرادار ما لكة دليل، نستنسخ الترجمة لنسختين (SRT و SSA) لترك الخيار للمشغل
+    else if (type === 'anime') {
+      results.push({
+        url: dlUrl, lang: 'ara', format: 'ssa', ext: 'ssa', subFormat: 'ssa',
+        fileName: '[SSA] ' + releaseName, origName: '[SSA] ' + releaseName, _source: 'subdl',
+        _isZip: true, _episode: episode || 1, _priority: 1
+      });
+      results.push({
+        url: dlUrl, lang: 'ara', format: 'srt', ext: 'srt', subFormat: 'srt',
+        fileName: '[SRT] ' + releaseName, origName: '[SRT] ' + releaseName, _source: 'subdl',
+        _isZip: true, _episode: episode || 1, _priority: 2
+      });
+    } 
+    // 3. الأفلام والمسلسلات العادية تبقى SRT
+    else {
+      results.push({
+        url: dlUrl, lang: 'ara', format: 'srt', ext: 'srt', subFormat: 'srt',
+        fileName: releaseName, origName: releaseName, _source: 'subdl',
+        _isZip: !dlUrl.endsWith('.srt'), _episode: episode || 1, _priority: 2
+      });
+    }
+
+    return results;
+  }).filter(s => s.url);
 }
 
 async function fetchSubDLOfficial(imdbId, season, episode, type, apiKey) {
   if (!apiKey || !imdbId || !imdbId.startsWith('tt')) return [];
-
   try {
-    const params = new URLSearchParams({
-      api_key: apiKey.trim(),
-      imdb_id: imdbId,
-      languages: 'AR,EN'
-    });
-
+    const params = new URLSearchParams({ api_key: apiKey.trim(), imdb_id: imdbId, languages: 'AR' });
     if (season) params.set('season_number', String(season));
     if (episode) params.set('episode_number', String(episode));
     if (type) params.set('type', type === 'series' ? 'series' : 'movie');
 
     const res = await axios.get(`https://api.subdl.com/api/v1/subtitles?${params.toString()}`, {
-      headers: {
-        'User-Agent': getRandomUA(),
-        'Accept': 'application/json'
-      },
-      timeout: 8000
+      headers: { 'User-Agent': getRandomUA(), 'Accept': 'application/json' }, timeout: 8000
     });
-
     if (!res.data?.status || !Array.isArray(res.data?.subtitles)) return [];
-
-    return res.data.subtitles.map(item => {
-      const langRaw = (item.lang || item.language || 'Arabic').toLowerCase();
-      const isAr = langRaw.startsWith('ar') || langRaw === 'ara';
-      const releaseName = item.release_name || item.name || '';
-      
-      const isAss = checkIsAssFormat(item); 
-
-      let dlUrl = item.url || '';
-      if (dlUrl && !dlUrl.startsWith('http')) {
-        dlUrl = `https://dl.subdl.com${dlUrl.startsWith('/') ? '' : '/'}${dlUrl}`;
-      }
-
-      // الاعتماد حصراً على ass مثل ما وضحت
-      const cleanFormat = isAss ? 'ass' : 'srt';
-
-      return {
-        url: dlUrl,
-        lang: isAr ? 'ara' : 'eng',
-        format: cleanFormat,
-        ext: cleanFormat,
-        subFormat: cleanFormat,
-        fileName: releaseName,
-        origName: releaseName || 'SubDL Official',
-        _source: 'subdl',
-        _isZip: true,
-        _episode: episode || 1,
-        _priority: isAr ? (isAss ? 0 : 1) : 3
-      };
-    }).filter(s => s.url && s.lang === 'ara'); 
-  } catch (e) {
-    return [];
-  }
+    return processSubDLItems(res.data.subtitles, type, episode);
+  } catch (e) { return []; }
 }
 
 async function fetchSubDLStremTop(imdbId, season, episode, type, apiKey) {
   if (!imdbId || !imdbId.startsWith('tt')) return [];
-
   try {
     const configPath = buildSubDLStremConfig(apiKey);
-    const isSeries = type === 'series' || !!season;
-    const endpointType = isSeries ? 'series' : 'movie';
-    const targetId = isSeries && season ? `${imdbId}:${season}:${episode || 1}` : imdbId;
-
+    const endpointType = (type === 'series' || !!season) ? 'series' : 'movie';
+    const targetId = (type === 'series' || !!season) && season ? `${imdbId}:${season}:${episode || 1}` : imdbId;
+    
     const requestUrl = `https://subdl.strem.top/${configPath}/subtitles/${endpointType}/${targetId}.json`;
-
     const res = await axios.get(requestUrl, {
-      headers: {
-        'User-Agent': getRandomUA(),
-        'Accept': 'application/json'
-      },
-      timeout: 9000
+      headers: { 'User-Agent': getRandomUA(), 'Accept': 'application/json' }, timeout: 9000
     });
-
-    const list = res.data?.subtitles || [];
-    if (!Array.isArray(list)) return [];
-
-    return list.map(item => {
-      const langRaw = (item.lang || 'ara').toLowerCase();
-      const isArabic = langRaw.startsWith('ar') || langRaw === 'ara';
-      const isAss = checkIsAssFormat(item);
-      const cleanFormat = isAss ? 'ass' : 'srt'; // الاعتماد على ass
-
-      return {
-        url: item.url,
-        lang: isArabic ? 'ara' : 'eng',
-        format: cleanFormat,
-        ext: cleanFormat,
-        subFormat: cleanFormat,
-        fileName: item.id || '',
-        origName: item.id || 'SubDL Strem',
-        _source: 'subdl',
-        _isZip: false, 
-        _priority: isArabic ? (isAss ? 0 : 2) : 3
-      };
-    }).filter(s => s.url && s.lang === 'ara');
-  } catch (err) {
-    return [];
-  }
+    if (!Array.isArray(res.data?.subtitles)) return [];
+    return processSubDLItems(res.data.subtitles, type, episode);
+  } catch (err) { return []; }
 }
 
 async function fetchSubDLMirror(imdbId, season, episode, type) {
@@ -164,57 +133,35 @@ async function fetchSubDLMirror(imdbId, season, episode, type) {
   try {
     const mediaType = season ? 'series' : (type === 'series' ? 'series' : 'movie');
     const mirrorTargetId = season ? `${imdbId}:${season}:${episode || 1}` : imdbId;
-    const r = await axios.get(
-      `https://subdl-stremio.vercel.app/subtitles/${mediaType}/${mirrorTargetId}.json`,
-      {
-        headers: { 'User-Agent': getRandomUA() },
-        timeout: 5000
-      }
-    );
-
-    return (r.data?.subtitles || []).map(s => {
-      const langRaw = (s.lang || 'ara').toLowerCase();
-      const isArabic = langRaw.startsWith('ar');
-      const isAss = checkIsAssFormat(s);
-      const cleanFormat = isAss ? 'ass' : 'srt'; // الاعتماد على ass
-
-      return {
-        url: s.url,
-        lang: isArabic ? 'ara' : 'eng',
-        format: cleanFormat,
-        ext: cleanFormat,
-        subFormat: cleanFormat,
-        fileName: s.title || s.name || '',
-        origName: s.title || s.name || 'SubDL Mirror',
-        _source: 'subdl',
-        _isZip: false,
-        _priority: isArabic ? (isAss ? 0 : 2) : 3
-      };
-    }).filter(s => s.url && s.lang === 'ara');
-  } catch (e) {
-    return [];
-  }
+    const r = await axios.get(`https://subdl-stremio.vercel.app/subtitles/${mediaType}/${mirrorTargetId}.json`, {
+      headers: { 'User-Agent': getRandomUA() }, timeout: 5000
+    });
+    return processSubDLItems(r.data?.subtitles || [], type, episode);
+  } catch (e) { return []; }
 }
 
 async function getSubDL({ imdbId, season, episode, type, apiKey }) {
   if (!imdbId || !imdbId.startsWith('tt')) return [];
 
   const requests = [];
-
-  if (apiKey) {
-    requests.push(fetchSubDLOfficial(imdbId, season, episode, type, apiKey));
-  }
-
+  if (apiKey) requests.push(fetchSubDLOfficial(imdbId, season, episode, type, apiKey));
   requests.push(fetchSubDLStremTop(imdbId, season, episode, type, apiKey));
   requests.push(fetchSubDLMirror(imdbId, season, episode, type));
 
   const results = await Promise.allSettled(requests);
-  
-  // إرجاع كافة النتائج بدون فلتر التصفية (لضمان ظهور كل شيء كما طلبت)
-  return results
-    .filter(r => r.status === 'fulfilled')
-    .flatMap(r => r.value)
-    .filter(s => s && s.url);
+  const allSubs = results.filter(r => r.status === 'fulfilled').flatMap(r => r.value);
+
+  // إزالة التكرار بدقة (الرابط + الصيغة)
+  const uniqueSubs = [];
+  const seenUrls = new Set();
+  for (const sub of allSubs) {
+    const dedupKey = `${sub.url.split('?')[0]}-${sub.format}`;
+    if (seenUrls.has(dedupKey)) continue;
+    seenUrls.add(dedupKey);
+    uniqueSubs.push(sub);
+  }
+
+  return uniqueSubs;
 }
 
 module.exports = { getSubDL };
