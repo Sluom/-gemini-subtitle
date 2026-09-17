@@ -608,7 +608,7 @@ app.get([
       }).catch(() => []));
     }
 
-    if (getWyzie && config.wyzieKey && imdbId) {
+    if (getWyzie && imdbId) {
       tasks.push(getWyzie({
         imdbId,
         season,
