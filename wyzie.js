@@ -1,20 +1,17 @@
 const axios = require('axios');
 
-const DEFAULT_KEY = 'zie-hf4qe3asclp38i3xhdbqdmqpgvxsvoav';
+const DEFAULT_KEY = 'wyzie-hf4qe3asclp38i3xhdbqdmqpgvxsvoav';
 
 async function getWyzie({ imdbId, season, episode, type, apiKey }) {
   if (!imdbId || !imdbId.startsWith('tt')) return [];
 
   const activeKey = (apiKey && apiKey.length > 10) ? apiKey.trim() : DEFAULT_KEY;
-
-  // المصادر المسموحة رسمياً للمفتاح المجاني (Free-Verified) حتى لا يرفض السيرفر الطلب
   const sources = 'opensubtitles,indexsubtitle,tvsubtitles';
   
   let params = `id=${imdbId}&source=${sources}&key=${activeKey}`;
   if (season != null && episode != null) {
     params += `&season=${season}&episode=${episode}`;
   }
-  // ويزي يعتمد كود ar للغة العربية
   params += `&language=ar`;
 
   try {
