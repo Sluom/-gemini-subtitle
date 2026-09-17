@@ -28,7 +28,7 @@ function buildSubDLStremConfig(apiKey) {
   }
 }
 
-// دالة فحص ذكية تكشف إذا كانت ترجمة SubDL بصيغة ASS
+// دالة فحص ذكية مطورة تكشف صيغ ASS حتى لو كانت مخفية داخل أسماء فرق الأنمي
 function checkIsAssFormat(item) {
   const checkTargets = [
     item.sub_format,
@@ -41,14 +41,24 @@ function checkIsAssFormat(item) {
     item.author
   ].filter(Boolean).map(v => String(v).toLowerCase());
 
-  return checkTargets.some(str => 
-    str.includes('.ass') || 
-    str.includes('.ssa') || 
-    str === 'ass' || 
-    str === 'ssa' ||
-    str.includes('styled') ||
-    str.includes('[ass]')
-  );
+  // فرق الأنمي المشهورة اللي دائماً ترفع ترجماتها بصيغة ASS حصراً
+  const animeGroups = [
+    'erai-raws', 'subsplease', 'horriblesubs', 'judas', 'golumpa', 
+    'asw', 'dkb', 'btt', 'ember', 'subs-please', 'yameii', 'seadex',
+    'commie', 'coalgirls', 'kamigami', 'mtbb'
+  ];
+
+  return checkTargets.some(str => {
+    // الفحص العادي للامتدادات
+    if (str.includes('.ass') || str.includes('.ssa') || str === 'ass' || str === 'ssa' || str.includes('styled') || str.includes('[ass]')) {
+      return true;
+    }
+    // الفحص الذكي: إذا اسم الإصدار تابع لفرقة أنمي، نعتبره ASS فوراً
+    if (animeGroups.some(group => str.includes(group))) {
+      return true;
+    }
+    return false;
+  });
 }
 
 async function fetchSubDLOfficial(imdbId, season, episode, type, apiKey) {
@@ -199,10 +209,24 @@ async function getSubDL({ imdbId, season, episode, type, apiKey }) {
   requests.push(fetchSubDLMirror(imdbId, season, episode, type));
 
   const results = await Promise.allSettled(requests);
-  return results
+  const allSubs = results
     .filter(r => r.status === 'fulfilled')
     .flatMap(r => r.value)
     .filter(s => s && s.url);
+
+  // نظام فلترة لمنع تكرار نفس الترجمة من السيرفرات الثلاثة
+  const uniqueSubs = [];
+  const seenUrls = new Set();
+
+  for (const sub of allSubs) {
+    // توحيد الرابط لغرض الفلترة (إزالة بروتوكول http/https لحذف النسخ المتطابقة بدقة)
+    const cleanUrl = sub.url.replace(/^https?:\/\//, '').split('?')[0];
+    if (seenUrls.has(cleanUrl)) continue;
+    seenUrls.add(cleanUrl);
+    uniqueSubs.push(sub);
+  }
+
+  return uniqueSubs;
 }
 
 module.exports = { getSubDL };
