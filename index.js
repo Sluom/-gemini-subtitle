@@ -11,6 +11,9 @@ const { getSubDL } = require('./subdl');
 const { getSubSource, fetchSubSourceBuffer } = require('./subsource');
 const { getAnimeSubtitles } = require('./anime');
 
+// استدعاء دوال الذكاء الاصطناعي الجديدة
+const { handleTranslationSrt, handleTranslationAss } = require('./ai');
+
 let getWyzie = null;
 try {
   const wyzieMod = require('./wyzie');
@@ -668,7 +671,8 @@ app.get([
         url: finalUrl,
         lang: s.lang || 'ara',
         format: ext,
-        _priority: s._priority !== undefined ? s._priority : (isAssTrack ? 0 : 2)
+        _priority: s._priority !== undefined ? s._priority : (isAssTrack ? 0 : 2),
+        _originalUrl: finalUrl
       };
     });
 
@@ -688,9 +692,88 @@ app.get([
       return true;
     });
 
-    res.json({ subtitles: uniqueSubs });
+    // --- إضافة نظام الترجمة بالذكاء الاصطناعي (Trans-SRT و Trans-ASS) ---
+    const transSubs = [];
+    
+    // البحث عن أفضل ملف ترجمة متوفر (يفضل الإنجليزي إذا وجد، وإلا أي ملف آخر)
+    let bestSourceForTranslation = uniqueSubs.find(s => (s.lang === 'eng' || s.lang === 'en') && s.url);
+    if (!bestSourceForTranslation) {
+        bestSourceForTranslation = uniqueSubs.find(s => s.url); 
+    }
+
+    if (bestSourceForTranslation) {
+      const sourceUrl = encodeURIComponent(bestSourceForTranslation._originalUrl || bestSourceForTranslation.url);
+      
+      // بناء الروابط الأربعة وإعطاؤها أولوية 10 لتظهر في النهاية
+      transSubs.push({
+        id: `trans-srt-1`,
+        url: `${baseUrl}/stream-ai.srt?url=${sourceUrl}`,
+        lang: 'ara',
+        format: 'srt',
+        _priority: 10
+      });
+      transSubs.push({
+        id: `trans-srt-2`,
+        url: `${baseUrl}/stream-ai.srt?url=${sourceUrl}`,
+        lang: 'ara',
+        format: 'srt',
+        _priority: 10
+      });
+
+      transSubs.push({
+        id: `trans-ass-1`,
+        url: `${baseUrl}/stream-ai.ass?url=${sourceUrl}`,
+        lang: 'ara',
+        format: 'ass',
+        _priority: 11
+      });
+      transSubs.push({
+        id: `trans-ass-2`,
+        url: `${baseUrl}/stream-ai.ass?url=${sourceUrl}`,
+        lang: 'ara',
+        format: 'ass',
+        _priority: 11
+      });
+    }
+    // -----------------------------------------------------------
+
+    // دمج النتائج العادية أولاً، ثم روابط الذكاء الاصطناعي في النهاية
+    const finalSubs = [...uniqueSubs, ...transSubs];
+
+    res.json({ subtitles: finalSubs });
   } catch (err) {
     res.json({ subtitles: [] });
+  }
+});
+
+app.all(['/stream-ai.srt', '/stream-ai.ass', '/stream-ai.ssa'], async (req, res) => {
+  if (req.method === 'OPTIONS') return res.sendStatus(200);
+  
+  const targetUrl = req.query.url;
+  if (!targetUrl) return res.status(400).send('Missing URL for AI translation');
+
+  const config = parseConfig(req);
+  const isAss = req.path.endsWith('.ass') || req.path.endsWith('.ssa');
+
+  try {
+    let finalContent = '';
+
+    if (isAss) {
+      finalContent = await handleTranslationAss(targetUrl, config);
+      res.setHeader('Content-Type', 'text/x-ssa; charset=utf-8');
+      res.setHeader('Content-Disposition', 'inline; filename="Trans-ASS.ssa"');
+    } else {
+      finalContent = await handleTranslationSrt(targetUrl, config);
+      res.setHeader('Content-Type', 'application/x-subrip; charset=utf-8');
+      res.setHeader('Content-Disposition', 'inline; filename="Trans-SRT.srt"');
+    }
+
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Headers', '*');
+    res.send(finalContent);
+  } catch (e) {
+    console.error('AI Translation Error:', e.message);
+    res.status(500).send('Error generating AI translation');
   }
 });
 
