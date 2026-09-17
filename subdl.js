@@ -28,29 +28,24 @@ function buildSubDLStremConfig(apiKey) {
   }
 }
 
-// الرادار الهجومي لاصطياد الـ ASS المخفي داخل ملفات ZIP
-function checkIsAssFormat(item, type) {
+// دالة الكشف الذكية: تعتمد على الدلائل القاطعة فقط لتجنب الشاشات الفارغة
+function checkIsAssFormat(item) {
   const strDump = [
     item.sub_format, item.format, item.type, item.release_name,
     item.name, item.url, item.file_name, item.author, item.id
   ].filter(Boolean).join(' ').toLowerCase();
 
-  // 1. الدلائل الصريحة لوบัง وجدت
+  // إذا كان الرابط نفسه ينتهي بـ srt فهو srt قطعا ولا نخدع المشغل
+  if (item.url && item.url.toLowerCase().endsWith('.srt')) return false;
+
+  // 1. الدلائل الصريحة لوجود ASS
   if (strDump.includes('.ass') || strDump.includes('.ssa') || strDump.includes('[ass]') || strDump.includes('styled') || /\b(ass|ssa)\b/.test(strDump)) {
     return true;
   }
 
-  // 2. إذا كان التصنيف أنمي، نفرض أنه ASS (لتفعيل محرك Nuvio، والـ index.js سيتدبر الباقي)
-  if (type === 'anime') return true;
-
-  // 3. فرق الأنمي المشهورة 
+  // 2. فرق الأنمي المشهورة اللي ترفع شغلها ASS حصراً (هذا الفلتر يصيد الحقيقيات بس)
   const animeGroups = ['erai', 'subsplease', 'horrible', 'judas', 'golumpa', 'ember', 'yameii', 'seadex', 'commie', 'vcb', 'nyaa', 'dame', 'mtbb'];
   if (animeGroups.some(g => strDump.includes(g))) {
-    return true;
-  }
-
-  // 4. ميزة الأقواس المربعة الشائعة جداً بأسماء ملفات الأنمي
-  if (/\[.*?\]/.test(strDump)) {
     return true;
   }
 
@@ -64,7 +59,7 @@ async function fetchSubDLOfficial(imdbId, season, episode, type, apiKey) {
     const params = new URLSearchParams({
       api_key: apiKey.trim(),
       imdb_id: imdbId,
-      languages: 'AR,EN' // نسحب لغتين ونفلتر لاحقاً لضمان عدم نقص النتائج
+      languages: 'AR,EN'
     });
 
     if (season) params.set('season_number', String(season));
@@ -86,8 +81,7 @@ async function fetchSubDLOfficial(imdbId, season, episode, type, apiKey) {
       const isAr = langRaw.startsWith('ar') || langRaw === 'ara';
       const releaseName = item.release_name || item.name || '';
       
-      // تمرير الـ type للرادار
-      const isAss = checkIsAssFormat(item, type); 
+      const isAss = checkIsAssFormat(item); 
 
       let dlUrl = item.url || '';
       if (dlUrl && !dlUrl.startsWith('http')) {
@@ -108,7 +102,7 @@ async function fetchSubDLOfficial(imdbId, season, episode, type, apiKey) {
         _episode: episode || 1,
         _priority: isAr ? (isAss ? 0 : 1) : 3
       };
-    }).filter(s => s.url && s.lang === 'ara'); // إبقاء الترجمات العربية فقط لتقليل الزحمة
+    }).filter(s => s.url && s.lang === 'ara'); 
   } catch (e) {
     return [];
   }
@@ -139,7 +133,7 @@ async function fetchSubDLStremTop(imdbId, season, episode, type, apiKey) {
     return list.map(item => {
       const langRaw = (item.lang || 'ara').toLowerCase();
       const isArabic = langRaw.startsWith('ar') || langRaw === 'ara';
-      const isAss = checkIsAssFormat(item, type);
+      const isAss = checkIsAssFormat(item);
       const cleanFormat = isAss ? 'ass' : 'srt';
 
       return {
@@ -175,7 +169,7 @@ async function fetchSubDLMirror(imdbId, season, episode, type) {
     return (r.data?.subtitles || []).map(s => {
       const langRaw = (s.lang || 'ara').toLowerCase();
       const isArabic = langRaw.startsWith('ar');
-      const isAss = checkIsAssFormat(s, type);
+      const isAss = checkIsAssFormat(s);
       const cleanFormat = isAss ? 'ass' : 'srt';
 
       return {
@@ -208,24 +202,12 @@ async function getSubDL({ imdbId, season, episode, type, apiKey }) {
   requests.push(fetchSubDLMirror(imdbId, season, episode, type));
 
   const results = await Promise.allSettled(requests);
-  const allSubs = results
+  
+  // إرجاع كافة النتائج بدون فلتر التصفية (لضمان ظهور كل شيء كما طلبت)
+  return results
     .filter(r => r.status === 'fulfilled')
     .flatMap(r => r.value)
     .filter(s => s && s.url);
-
-  // نظام فلترة لمنع تكرار نفس الترجمة من السيرفرات الثلاثة والإبقاء على النسخ الصافية
-  const uniqueSubs = [];
-  const seenUrls = new Set();
-
-  for (const sub of allSubs) {
-    // توحيد الرابط لغرض الفلترة الدقيقة
-    const cleanUrl = sub.url.replace(/^https?:\/\//, '').split('?')[0];
-    if (seenUrls.has(cleanUrl)) continue;
-    seenUrls.add(cleanUrl);
-    uniqueSubs.push(sub);
-  }
-
-  return uniqueSubs;
 }
 
 module.exports = { getSubDL };
