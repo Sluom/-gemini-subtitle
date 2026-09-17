@@ -31,6 +31,28 @@ function checkIsAss(file, attr) {
   );
 }
 
+// دالة المطابقة الذكية: تبحث عن رقم الحلقة داخل اسم الملف
+function matchEpisode(fileName, targetEpisode) {
+  if (!targetEpisode) return true; // إذا كان فيلم مو مسلسل
+  const name = (fileName || '').toLowerCase();
+  
+  // إذا كان الملف مضغوط بحزمة zip/rar، نمرره لأن index.js سيتولى فك الضغط واستخراج الحلقة
+  if (name.includes('.zip') || name.includes('.rar')) return true;
+
+  const epStr = parseInt(targetEpisode, 10).toString();
+  
+  // أنماط البحث (Regex) لاصطياد رقم الحلقة مهما كان شكل التسمية
+  const patterns = [
+    new RegExp(`(?:s0*\\d+[._ -]*)?(?:e|ep|episode)[._ -]*0*${epStr}(?:[^0-9]|$)`, 'i'), // S01E05, Ep05
+    new RegExp(`[._ -]0*${epStr}[._ -]`, 'i'), // - 05 - , _05_
+    new RegExp(`\\[0*${epStr}\\]`, 'i'), // [05]
+    new RegExp(`\\(0*${epStr}\\)`, 'i'), // (05)
+    new RegExp(`\\b0*${epStr}\\b`, 'i') // 05 (كلمة مستقلة)
+  ];
+
+  return patterns.some(p => p.test(name));
+}
+
 // السحب عبر الـ API الرسمي (الجديد)
 async function fetchOfficial(imdbId, season, episode, type, apiKey) {
   if (!apiKey || !imdbId || !imdbId.startsWith('tt')) return [];
@@ -48,7 +70,6 @@ async function fetchOfficial(imdbId, season, episode, type, apiKey) {
       params.set('imdb_id', cleanNumericId);
     }
 
-    // سحب صفحتين لضمان عدم ضياع ترجمات الـ ASS بالصفحات الخلفية
     const p1 = new URLSearchParams(params); p1.set('page', '1');
     const p2 = new URLSearchParams(params); p2.set('page', '2');
 
@@ -92,7 +113,7 @@ async function fetchOfficial(imdbId, season, episode, type, apiKey) {
   }
 }
 
-// دالة جلب بيانات السيرفر القديم بدون تخريب الروابط
+// دالة جلب بيانات السيرفر القديم
 async function fetchLegacyData(url) {
   try {
     const response = await fetch(url, {
@@ -135,7 +156,7 @@ async function fetchLegacyData(url) {
   }
 }
 
-// السحب عبر الـ API القديم
+// السحب عبر الـ API القديم (مع المطابقة الذكية)
 async function fetchLegacyApi(imdbId, season, episode) {
   if (!imdbId || !imdbId.startsWith('tt')) return [];
   const numericId = imdbId.replace(/^tt/, '').replace(/^0+/, '');
@@ -147,15 +168,21 @@ async function fetchLegacyApi(imdbId, season, episode) {
 
   let results = await fetchLegacyData(primaryUrl);
 
-  // الحل السحري: الأنمي وملفات الـ ASS تنرفع غالباً كحزمة للعمل كله مو للحلقة
-  if (season != null) {
+  if (season != null && episode != null) {
     const hasAss = results.some(r => r.format === 'ass' || r.format === 'ssa');
+    
+    // إذا لم نجد ASS في حلقة محددة، نقوم بسحب الحزمة الكاملة ونفلترها
     if (!hasAss) {
       const fallbackUrl = `https://rest.opensubtitles.org/search/imdbid-${numericId}/sublanguageid-ara`;
       const fallbackResults = await fetchLegacyData(fallbackUrl);
-      // نأخذ "فقط" ملفات الـ ASS من الحزمة حتى لا نلوث القائمة بـ 200 ترجمة SRT فارغة للحلقات الأخرى
-      const fallbackAss = fallbackResults.filter(r => r.format === 'ass' || r.format === 'ssa');
-      results = [...results, ...fallbackAss];
+      
+      const filteredFallback = fallbackResults.filter(r => {
+        // نأخذ فقط ملفات ASS/SSA ونطبق عليها نظام المطابقة الذكي لرقم الحلقة
+        if (r.format !== 'ass' && r.format !== 'ssa') return false;
+        return matchEpisode(r.fileName, episode);
+      });
+      
+      results = [...results, ...filteredFallback];
     }
   }
 
@@ -230,7 +257,6 @@ async function getOpenSubtitles({ imdbId, season, episode, type, apiKey }) {
       fileId = match[1];
     }
     
-    // ندمج الـ ID مع الصيغة حتى لو السيرفر الجديد اعتبرها SRT والقديم جابها ASS، ما تنمسح من القائمة
     const dedupKey = `${fileId}-${sub.format}`;
 
     if (seenIds.has(dedupKey)) continue;
