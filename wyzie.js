@@ -1,19 +1,21 @@
 const axios = require('axios');
 
+const DEFAULT_KEY = 'zie-hf4qe3asclp38i3xhdbqdmqpgvxsvoav';
+
 async function getWyzie({ imdbId, season, episode, type, apiKey }) {
   if (!imdbId || !imdbId.startsWith('tt')) return [];
 
-  // استخدام المفتاح المرسل من إعدادات الموقع أو المتاح بالبيئة
-  const activeKey = apiKey || process.env.WYZIE_API_KEY;
-  if (!activeKey || activeKey.length < 10) return [];
+  const activeKey = (apiKey && apiKey.length > 10) ? apiKey.trim() : DEFAULT_KEY;
 
-  const sources = 'subf2m,opensubtitles,kitsunekko,gestdown,yify,tvsubtitles,animetosho,indexsubtitle';
+  // المصادر المسموحة رسمياً للمفتاح المجاني (Free-Verified) حتى لا يرفض السيرفر الطلب
+  const sources = 'opensubtitles,indexsubtitle,tvsubtitles';
   
-  let params = `id=${imdbId}&source=${sources}&key=${activeKey.trim()}`;
+  let params = `id=${imdbId}&source=${sources}&key=${activeKey}`;
   if (season != null && episode != null) {
     params += `&season=${season}&episode=${episode}`;
   }
-  params += `&language=ar,ara`;
+  // ويزي يعتمد كود ar للغة العربية
+  params += `&language=ar`;
 
   try {
     const url = `https://sub.wyzie.io/search?${params}`;
