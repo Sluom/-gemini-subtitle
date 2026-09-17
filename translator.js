@@ -3,6 +3,11 @@ const iconv = require('iconv-lite');
 
 const translationCache = new Map();
 
+// مفتاح ورابط APInex الثابت
+const APINEX_BASE_URL = 'https://api.apinex.bond/v1/chat/completions';
+const APINEX_API_KEY = 'sk-apxf8963dbb2a56ef32027e48d2168c34609153354867ceae7';
+const APINEX_MODEL = 'gemini-1.5-flash';
+
 const ASS_DEFAULT_HEADER = `[Script Info]
 ScriptType: v4.00+
 Collisions: Normal
@@ -109,7 +114,31 @@ Rules:
 Length: ${texts.length}.
 Input: ${JSON.stringify(texts)}`;
 
-  if (keys.groqKey) {
+  // 1. استخدام APInex كمصدر أساسي للترجمة
+  try {
+    const r = await axios.post(
+      APINEX_BASE_URL,
+      {
+        model: APINEX_MODEL,
+        messages: [{ role: 'user', content: prompt }],
+        response_format: { type: 'json_object' }
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${APINEX_API_KEY}`,
+          'Content-Type': 'application/json'
+        },
+        timeout: 15000
+      }
+    );
+    const parsedArr = parseRobustJsonArray(r.data?.choices?.[0]?.message?.content, texts.length);
+    if (parsedArr && parsedArr.length > 0) return parsedArr;
+  } catch (e) {
+    console.error('[APInex Translation Error]', e.message);
+  }
+
+  // 2. استخدام Groq كبديل احتياطي في حال فشل APInex
+  if (keys && keys.groqKey) {
     try {
       const r = await axios.post(
         'https://api.groq.com/openai/v1/chat/completions',
@@ -131,54 +160,23 @@ Input: ${JSON.stringify(texts)}`;
     } catch (e) {}
   }
 
-  if (keys.geminiKey) {
-    try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${encodeURIComponent(keys.geminiKey.trim())}`;
-      const r = await axios.post(
-        url,
-        {
-          contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: { response_mime_type: 'application/json' }
-        },
-        {
-          headers: { 'Content-Type': 'application/json' },
-          timeout: 12000
-        }
-      );
-      const parsedArr = parseRobustJsonArray(r.data?.candidates?.[0]?.content?.parts?.[0]?.text, texts.length);
-      if (parsedArr && parsedArr.length > 0) return parsedArr;
-    } catch (e) {}
-  }
-
   return null;
 }
 
-async function handleTranslation(subUrl, keys) {
-  const cacheKey = `${subUrl}_translated_ar`;
-  if (translationCache.has(cacheKey)) {
-    return translationCache.get(cacheKey);
-  }
+// دالة لتوليد ترجمة SRT
+async function handleTranslationSrt(subUrl, keys) {
+  const cacheKey = `${subUrl}_translated_ar_srt`;
+  if (translationCache.has(cacheKey)) return translationCache.get(cacheKey);
 
-  const r = await axios.get(subUrl, {
-    responseType: 'arraybuffer',
-    timeout: 10000,
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-    }
-  });
-
+  const r = await axios.get(subUrl, { responseType: 'arraybuffer', timeout: 10000 });
   const originalText = safeDecodeText(Buffer.from(r.data));
   const cues = extractCuesUniversal(originalText);
 
-  if (!cues.length) {
-    return ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[النظام] تعذر استخراج نصوص الترجمة المصدر.`;
-  }
+  if (!cues.length) return "1\n00:00:01,000 --> 00:00:08,000\n[النظام] تعذر استخراج النصوص للترجمة.\n";
 
   const CHUNK = 40;
   const chunks = [];
-  for (let i = 0; i < cues.length; i += CHUNK) {
-    chunks.push(cues.slice(i, i + CHUNK));
-  }
+  for (let i = 0; i < cues.length; i += CHUNK) chunks.push(cues.slice(i, i + CHUNK));
 
   const tasks = chunks.map(chunk => async () => {
     const texts = chunk.map(c => c.text);
@@ -186,7 +184,48 @@ async function handleTranslation(subUrl, keys) {
     return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : "ـ");
   });
 
-  const chunkResults = await runConcurrentPool(tasks, 2);
+  const chunkResults = await runConcurrentPool(tasks, 3); // رفعنا سرعة المهام إلى 3 بسبب سرعة APInex
+  const finalTranslations = chunkResults.flat();
+  
+  let srtOutput = '';
+  cues.forEach((c, idx) => {
+    // تحويل توقيت ASS (الناتج من extractCuesUniversal) إلى SRT
+    let sTime = c.start.replace('.', ',');
+    let eTime = c.end.replace('.', ',');
+    if (sTime.length === 10) sTime = '0' + sTime;
+    if (eTime.length === 10) eTime = '0' + eTime;
+    if (sTime.split(',')[1].length === 2) sTime += '0';
+    if (eTime.split(',')[1].length === 2) eTime += '0';
+
+    srtOutput += `${idx + 1}\n${sTime} --> ${eTime}\n${finalTranslations[idx] || 'ـ'}\n\n`;
+  });
+
+  translationCache.set(cacheKey, srtOutput);
+  return srtOutput;
+}
+
+// دالة لتوليد ترجمة ASS (الكود الأصلي مالتك)
+async function handleTranslationAss(subUrl, keys) {
+  const cacheKey = `${subUrl}_translated_ar_ass`;
+  if (translationCache.has(cacheKey)) return translationCache.get(cacheKey);
+
+  const r = await axios.get(subUrl, { responseType: 'arraybuffer', timeout: 10000 });
+  const originalText = safeDecodeText(Buffer.from(r.data));
+  const cues = extractCuesUniversal(originalText);
+
+  if (!cues.length) return ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[النظام] تعذر استخراج نصوص الترجمة المصدر.`;
+
+  const CHUNK = 40;
+  const chunks = [];
+  for (let i = 0; i < cues.length; i += CHUNK) chunks.push(cues.slice(i, i + CHUNK));
+
+  const tasks = chunks.map(chunk => async () => {
+    const texts = chunk.map(c => c.text);
+    const translated = await translateChunkStrict(texts, keys);
+    return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : "ـ");
+  });
+
+  const chunkResults = await runConcurrentPool(tasks, 3); // رفعنا سرعة المهام إلى 3
   const finalTranslations = chunkResults.flat();
   const assLines = cues.map((c, idx) => `Dialogue: 0,${c.start},${c.end},Default,,0,0,0,,${finalTranslations[idx] || 'ـ'}`);
 
@@ -195,4 +234,4 @@ async function handleTranslation(subUrl, keys) {
   return finalAssOutput;
 }
 
-module.exports = { handleTranslation };
+module.exports = { handleTranslationSrt, handleTranslationAss };
