@@ -28,23 +28,23 @@ function buildSubDLStremConfig(apiKey) {
   }
 }
 
-// دالة الكشف الذكية: تعتمد على الدلائل القاطعة فقط لتجنب الشاشات الفارغة
+// دالة الكشف الذكية: تعتمد على الدلائل القاطعة وتخرج بصيغة ssa حصراً
 function checkIsAssFormat(item) {
   const strDump = [
     item.sub_format, item.format, item.type, item.release_name,
     item.name, item.url, item.file_name, item.author, item.id
   ].filter(Boolean).join(' ').toLowerCase();
 
-  // إذا كان الرابط نفسه ينتهي بـ srt فهو srt قطعا ولا نخدع المشغل
+  // إذا كان الرابط نفسه ينتهي بـ srt فهو srt قطعا
   if (item.url && item.url.toLowerCase().endsWith('.srt')) return false;
 
-  // 1. الدلائل الصريحة لوجود ASS
-  if (strDump.includes('.ass') || strDump.includes('.ssa') || strDump.includes('[ass]') || strDump.includes('styled') || /\b(ass|ssa)\b/.test(strDump)) {
+  // 1. الدلائل الصريحة لوجود ASS/SSA
+  if (strDump.includes('.ass') || strDump.includes('.ssa') || strDump.includes('[ass]') || strDump.includes('[ssa]') || strDump.includes('styled') || /\b(ass|ssa)\b/.test(strDump)) {
     return true;
   }
 
-  // 2. فرق الأنمي المشهورة اللي ترفع شغلها ASS حصراً (هذا الفلتر يصيد الحقيقيات بس)
-  const animeGroups = ['erai', 'subsplease', 'horrible', 'judas', 'golumpa', 'ember', 'yameii', 'seadex', 'commie', 'vcb', 'nyaa', 'dame', 'mtbb'];
+  // 2. فرق الأنمي المشهورة (تمت إضافة الفرق العربية والأجنبية)
+  const animeGroups = ['erai', 'subsplease', 'horrible', 'judas', 'golumpa', 'ember', 'yameii', 'seadex', 'commie', 'vcb', 'nyaa', 'dame', 'mtbb', 'saiko', 'an-raws', 'animetok'];
   if (animeGroups.some(g => strDump.includes(g))) {
     return true;
   }
@@ -88,13 +88,15 @@ async function fetchSubDLOfficial(imdbId, season, episode, type, apiKey) {
         dlUrl = `https://dl.subdl.com${dlUrl.startsWith('/') ? '' : '/'}${dlUrl}`;
       }
 
-      const cleanFormat = isAss ? 'ass' : 'srt';
+      // توحيد الصيغة لـ ssa ليقرأها تطبيق Nuvio بشكل صحيح
+      const cleanFormat = isAss ? 'ssa' : 'srt';
 
       return {
         url: dlUrl,
         lang: isAr ? 'ara' : 'eng',
         format: cleanFormat,
         ext: cleanFormat,
+        subFormat: cleanFormat,
         fileName: releaseName,
         origName: releaseName || 'SubDL Official',
         _source: 'subdl',
@@ -134,13 +136,14 @@ async function fetchSubDLStremTop(imdbId, season, episode, type, apiKey) {
       const langRaw = (item.lang || 'ara').toLowerCase();
       const isArabic = langRaw.startsWith('ar') || langRaw === 'ara';
       const isAss = checkIsAssFormat(item);
-      const cleanFormat = isAss ? 'ass' : 'srt';
+      const cleanFormat = isAss ? 'ssa' : 'srt'; // الاعتماد على ssa
 
       return {
         url: item.url,
         lang: isArabic ? 'ara' : 'eng',
         format: cleanFormat,
         ext: cleanFormat,
+        subFormat: cleanFormat,
         fileName: item.id || '',
         origName: item.id || 'SubDL Strem',
         _source: 'subdl',
@@ -170,13 +173,14 @@ async function fetchSubDLMirror(imdbId, season, episode, type) {
       const langRaw = (s.lang || 'ara').toLowerCase();
       const isArabic = langRaw.startsWith('ar');
       const isAss = checkIsAssFormat(s);
-      const cleanFormat = isAss ? 'ass' : 'srt';
+      const cleanFormat = isAss ? 'ssa' : 'srt'; // الاعتماد على ssa
 
       return {
         url: s.url,
         lang: isArabic ? 'ara' : 'eng',
         format: cleanFormat,
         ext: cleanFormat,
+        subFormat: cleanFormat,
         fileName: s.title || s.name || '',
         origName: s.title || s.name || 'SubDL Mirror',
         _source: 'subdl',
@@ -203,7 +207,6 @@ async function getSubDL({ imdbId, season, episode, type, apiKey }) {
 
   const results = await Promise.allSettled(requests);
   
-  // إرجاع كافة النتائج بدون فلتر التصفية (لضمان ظهور كل شيء كما طلبت)
   return results
     .filter(r => r.status === 'fulfilled')
     .flatMap(r => r.value)
