@@ -81,12 +81,12 @@ async function fetchOfficial(imdbId, season, episode, type, apiKey) {
   }
 }
 
-// دالة داخلية لجلب بيانات السيرفر القديم باستخدام Fetch لتخطي الحظر
+// دالة داخلية لجلب بيانات السيرفر القديم
 async function fetchLegacyData(url) {
   try {
     const response = await fetch(url, {
       headers: {
-        'User-Agent': 'VLSub 0.10.3', // فرض صارم للهيدر لتخطي الحظر
+        'User-Agent': 'VLSub 0.10.3', 
         'X-User-Agent': 'VLSub 0.10.3',
         'Accept': 'application/json'
       }
@@ -98,7 +98,7 @@ async function fetchLegacyData(url) {
 
     const results = [];
     data.forEach(entry => {
-      const downloadLink = entry.SubDownloadLink;
+      let downloadLink = entry.SubDownloadLink;
       if (!downloadLink) return;
 
       const format = (entry.SubFormat || '').toLowerCase();
@@ -106,8 +106,14 @@ async function fetchLegacyData(url) {
       const isAss = format === 'ass' || format === 'ssa' || rawName.toLowerCase().includes('.ass') || rawName.toLowerCase().includes('.ssa');
       const finalExt = isAss ? 'ass' : 'srt';
 
+      // تطبيق خدعة إزالة الامتداد المزعج لتجنب الملفات الفارغة
+      let cleanUrl = downloadLink.replace(/\.gz$/i, '');
+      if (!cleanUrl.endsWith(finalExt)) {
+        cleanUrl += '.' + finalExt;
+      }
+
       results.push({
-        url: downloadLink,
+        url: cleanUrl,
         lang: 'ara',
         format: finalExt,
         ext: finalExt,
@@ -124,7 +130,7 @@ async function fetchLegacyData(url) {
   }
 }
 
-// السحب عبر الـ API القديم السحري (نفس SubSense)
+// السحب عبر الـ API القديم السحري
 async function fetchLegacyApi(imdbId, season, episode) {
   if (!imdbId || !imdbId.startsWith('tt')) return [];
   const numericId = imdbId.replace(/^tt/, '').replace(/^0+/, '');
@@ -136,7 +142,6 @@ async function fetchLegacyApi(imdbId, season, episode) {
 
   let results = await fetchLegacyData(primaryUrl);
 
-  // ضربة احتياطية للأنمي: إذا لم يجد نتائج بالحلقة، يبحث بالعمل ككل
   if (results.length === 0 && season != null) {
     const fallbackUrl = `https://rest.opensubtitles.org/search/imdbid-${numericId}/sublanguageid-ara`;
     results = await fetchLegacyData(fallbackUrl);
@@ -171,8 +176,13 @@ async function fetchMirror(imdbId, season, episode, type) {
         const isAss = subFormat === 'ssa' || subFormat === 'ass' || rawUrl.includes('.ass') || rawUrl.includes('.ssa') || rawName.includes('.ass') || rawName.includes('.ssa');
         const format = isAss ? 'ass' : 'srt';
 
+        let cleanUrl = s.url.replace(/\.gz$/i, '');
+        if (!cleanUrl.endsWith(format)) {
+          cleanUrl += '.' + format;
+        }
+
         return {
-          url: s.url,
+          url: cleanUrl,
           lang: 'ara',
           format: format,
           ext: format,
@@ -192,19 +202,36 @@ async function getOpenSubtitles({ imdbId, season, episode, type, apiKey }) {
   if (!imdbId || !imdbId.startsWith('tt')) return [];
 
   const tasks = [];
-  
-  if (apiKey) {
-    tasks.push(fetchOfficial(imdbId, season, episode, type, apiKey)); 
-  }
-  
+  if (apiKey) tasks.push(fetchOfficial(imdbId, season, episode, type, apiKey));
   tasks.push(fetchLegacyApi(imdbId, season, episode));
   tasks.push(fetchMirror(imdbId, season, episode, type));
 
   const settled = await Promise.allSettled(tasks);
-  return settled
+  const allSubs = settled
     .filter(r => r.status === 'fulfilled')
     .flatMap(r => r.value)
     .filter(s => s && s.url);
+
+  // إزالة التكرار الذكي باستخدام رقم ملف الترجمة (ID)
+  const uniqueSubs = [];
+  const seenIds = new Set();
+
+  for (const sub of allSubs) {
+    // استخراج رقم الترجمة من الرابط مهما كان شكله
+    const match = sub.url.match(/os:\/\/(\d+)/) || sub.url.match(/\/file\/(\d+)/);
+    const fileId = match ? match[1] : sub.url;
+
+    if (seenIds.has(fileId)) continue;
+    
+    seenIds.add(fileId);
+    uniqueSubs.push(sub);
+  }
+
+  // فصل الترجمات: ناخذ كل الـ ASS لأنها مهمة، وناخذ أفضل 15 فقط من الـ SRT لتقليل الزحمة
+  const assSubs = uniqueSubs.filter(s => s.format === 'ass');
+  const srtSubs = uniqueSubs.filter(s => s.format === 'srt').slice(0, 15);
+
+  return [...assSubs, ...srtSubs];
 }
 
 module.exports = { getOpenSubtitles };
