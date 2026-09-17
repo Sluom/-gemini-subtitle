@@ -28,23 +28,26 @@ function buildSubDLStremConfig(apiKey) {
   }
 }
 
-// دالة الكشف الذكية: تعتمد على الدلائل القاطعة وتخرج بصيغة ssa حصراً
+// دالة الكشف الذكية: تعتمد الدلائل القاطعة وتخرج بصيغة ass حصراً ليفهمها المشغل
 function checkIsAssFormat(item) {
   const strDump = [
     item.sub_format, item.format, item.type, item.release_name,
     item.name, item.url, item.file_name, item.author, item.id
   ].filter(Boolean).join(' ').toLowerCase();
 
-  // إذا كان الرابط نفسه ينتهي بـ srt فهو srt قطعا
+  // إذا كان الرابط نفسه ينتهي بـ srt فهو srt قطعا ولا نخدع المشغل
   if (item.url && item.url.toLowerCase().endsWith('.srt')) return false;
 
-  // 1. الدلائل الصريحة لوجود ASS/SSA
-  if (strDump.includes('.ass') || strDump.includes('.ssa') || strDump.includes('[ass]') || strDump.includes('[ssa]') || strDump.includes('styled') || /\b(ass|ssa)\b/.test(strDump)) {
+  // 1. الدلائل الصريحة لوجود ASS
+  if (strDump.includes('.ass') || strDump.includes('.ssa') || strDump.includes('[ass]') || strDump.includes('styled') || /\b(ass|ssa)\b/.test(strDump)) {
     return true;
   }
 
-  // 2. فرق الأنمي المشهورة (تمت إضافة الفرق العربية والأجنبية)
-  const animeGroups = ['erai', 'subsplease', 'horrible', 'judas', 'golumpa', 'ember', 'yameii', 'seadex', 'commie', 'vcb', 'nyaa', 'dame', 'mtbb', 'saiko', 'an-raws', 'animetok'];
+  // 2. فرق الأنمي المشهورة (عربية وأجنبية) لضمان الدقة وتجنب الشاشات الفارغة
+  const animeGroups = [
+    'erai', 'subsplease', 'horrible', 'judas', 'golumpa', 'ember', 'yameii', 'seadex', 'commie', 'vcb', 'nyaa', 'dame', 'mtbb',
+    'saiko', 'an-raws', 'animetok', 'msoms', 'shahiid', 'xotaku', 'an-sub', 'katsugeki', 'stardima', 'c-a', 'okanime'
+  ];
   if (animeGroups.some(g => strDump.includes(g))) {
     return true;
   }
@@ -88,8 +91,8 @@ async function fetchSubDLOfficial(imdbId, season, episode, type, apiKey) {
         dlUrl = `https://dl.subdl.com${dlUrl.startsWith('/') ? '' : '/'}${dlUrl}`;
       }
 
-      // توحيد الصيغة لـ ssa ليقرأها تطبيق Nuvio بشكل صحيح
-      const cleanFormat = isAss ? 'ssa' : 'srt';
+      // الاعتماد حصراً على ass مثل ما وضحت
+      const cleanFormat = isAss ? 'ass' : 'srt';
 
       return {
         url: dlUrl,
@@ -136,7 +139,7 @@ async function fetchSubDLStremTop(imdbId, season, episode, type, apiKey) {
       const langRaw = (item.lang || 'ara').toLowerCase();
       const isArabic = langRaw.startsWith('ar') || langRaw === 'ara';
       const isAss = checkIsAssFormat(item);
-      const cleanFormat = isAss ? 'ssa' : 'srt'; // الاعتماد على ssa
+      const cleanFormat = isAss ? 'ass' : 'srt'; // الاعتماد على ass
 
       return {
         url: item.url,
@@ -173,7 +176,7 @@ async function fetchSubDLMirror(imdbId, season, episode, type) {
       const langRaw = (s.lang || 'ara').toLowerCase();
       const isArabic = langRaw.startsWith('ar');
       const isAss = checkIsAssFormat(s);
-      const cleanFormat = isAss ? 'ssa' : 'srt'; // الاعتماد على ssa
+      const cleanFormat = isAss ? 'ass' : 'srt'; // الاعتماد على ass
 
       return {
         url: s.url,
@@ -207,6 +210,7 @@ async function getSubDL({ imdbId, season, episode, type, apiKey }) {
 
   const results = await Promise.allSettled(requests);
   
+  // إرجاع كافة النتائج بدون فلتر التصفية (لضمان ظهور كل شيء كما طلبت)
   return results
     .filter(r => r.status === 'fulfilled')
     .flatMap(r => r.value)
