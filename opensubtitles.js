@@ -31,7 +31,7 @@ function checkIsAss(file, attr) {
   );
 }
 
-// السحب عبر الـ API الرسمي بالمفتاح (الجديد)
+// السحب عبر الـ API الرسمي (الجديد)
 async function fetchOfficial(imdbId, season, episode, type, apiKey) {
   if (!apiKey || !imdbId || !imdbId.startsWith('tt')) return [];
 
@@ -81,7 +81,7 @@ async function fetchOfficial(imdbId, season, episode, type, apiKey) {
   }
 }
 
-// دالة داخلية لجلب بيانات السيرفر القديم
+// دالة داخلية لجلب بيانات السيرفر القديم بدون تخريب الروابط
 async function fetchLegacyData(url) {
   try {
     const response = await fetch(url, {
@@ -98,7 +98,7 @@ async function fetchLegacyData(url) {
 
     const results = [];
     data.forEach(entry => {
-      let downloadLink = entry.SubDownloadLink;
+      const downloadLink = entry.SubDownloadLink;
       if (!downloadLink) return;
 
       const format = (entry.SubFormat || '').toLowerCase();
@@ -106,14 +106,9 @@ async function fetchLegacyData(url) {
       const isAss = format === 'ass' || format === 'ssa' || rawName.toLowerCase().includes('.ass') || rawName.toLowerCase().includes('.ssa');
       const finalExt = isAss ? 'ass' : 'srt';
 
-      // تطبيق خدعة إزالة الامتداد المزعج لتجنب الملفات الفارغة
-      let cleanUrl = downloadLink.replace(/\.gz$/i, '');
-      if (!cleanUrl.endsWith(finalExt)) {
-        cleanUrl += '.' + finalExt;
-      }
-
+      // الرابط يرسل كما هو (حتى لو انتهى بـ .gz) لأن الـ index.js سيفك الضغط بذكاء
       results.push({
-        url: cleanUrl,
+        url: downloadLink,
         lang: 'ara',
         format: finalExt,
         ext: finalExt,
@@ -130,7 +125,7 @@ async function fetchLegacyData(url) {
   }
 }
 
-// السحب عبر الـ API القديم السحري
+// السحب عبر الـ API القديم
 async function fetchLegacyApi(imdbId, season, episode) {
   if (!imdbId || !imdbId.startsWith('tt')) return [];
   const numericId = imdbId.replace(/^tt/, '').replace(/^0+/, '');
@@ -176,13 +171,8 @@ async function fetchMirror(imdbId, season, episode, type) {
         const isAss = subFormat === 'ssa' || subFormat === 'ass' || rawUrl.includes('.ass') || rawUrl.includes('.ssa') || rawName.includes('.ass') || rawName.includes('.ssa');
         const format = isAss ? 'ass' : 'srt';
 
-        let cleanUrl = s.url.replace(/\.gz$/i, '');
-        if (!cleanUrl.endsWith(format)) {
-          cleanUrl += '.' + format;
-        }
-
         return {
-          url: cleanUrl,
+          url: s.url,
           lang: 'ara',
           format: format,
           ext: format,
@@ -212,14 +202,18 @@ async function getOpenSubtitles({ imdbId, season, episode, type, apiKey }) {
     .flatMap(r => r.value)
     .filter(s => s && s.url);
 
-  // إزالة التكرار الذكي باستخدام رقم ملف الترجمة (ID)
+  // نظام فلترة وتصفية صارم لمنع تكرار نفس الترجمة من السيرفرات الثلاثة
   const uniqueSubs = [];
   const seenIds = new Set();
 
   for (const sub of allSubs) {
-    // استخراج رقم الترجمة من الرابط مهما كان شكله
-    const match = sub.url.match(/os:\/\/(\d+)/) || sub.url.match(/\/file\/(\d+)/);
-    const fileId = match ? match[1] : sub.url;
+    let fileId = sub.url;
+    // استخراج المعرف الرقمي الصافي للترجمة سواء كان من API جديد أو قديم
+    const osMatch = sub.url.match(/os:\/\/(\d+)/);
+    const dlMatch = sub.url.match(/\/file\/(\d+)/);
+    
+    if (osMatch) fileId = osMatch[1];
+    else if (dlMatch) fileId = dlMatch[1];
 
     if (seenIds.has(fileId)) continue;
     
@@ -227,11 +221,8 @@ async function getOpenSubtitles({ imdbId, season, episode, type, apiKey }) {
     uniqueSubs.push(sub);
   }
 
-  // فصل الترجمات: ناخذ كل الـ ASS لأنها مهمة، وناخذ أفضل 15 فقط من الـ SRT لتقليل الزحمة
-  const assSubs = uniqueSubs.filter(s => s.format === 'ass');
-  const srtSubs = uniqueSubs.filter(s => s.format === 'srt').slice(0, 15);
-
-  return [...assSubs, ...srtSubs];
+  // إرجاع كافة الترجمات الفعالة بدون أي قيود أو قطع للعدد
+  return uniqueSubs;
 }
 
 module.exports = { getOpenSubtitles };
