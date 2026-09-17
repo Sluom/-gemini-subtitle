@@ -28,37 +28,33 @@ function buildSubDLStremConfig(apiKey) {
   }
 }
 
-// دالة فحص ذكية مطورة تكشف صيغ ASS حتى لو كانت مخفية داخل أسماء فرق الأنمي
-function checkIsAssFormat(item) {
-  const checkTargets = [
-    item.sub_format,
-    item.format,
-    item.type,
-    item.release_name,
-    item.name,
-    item.url,
-    item.file_name,
-    item.author
-  ].filter(Boolean).map(v => String(v).toLowerCase());
+// الرادار الهجومي لاصطياد الـ ASS المخفي داخل ملفات ZIP
+function checkIsAssFormat(item, type) {
+  const strDump = [
+    item.sub_format, item.format, item.type, item.release_name,
+    item.name, item.url, item.file_name, item.author, item.id
+  ].filter(Boolean).join(' ').toLowerCase();
 
-  // فرق الأنمي المشهورة اللي دائماً ترفع ترجماتها بصيغة ASS حصراً
-  const animeGroups = [
-    'erai-raws', 'subsplease', 'horriblesubs', 'judas', 'golumpa', 
-    'asw', 'dkb', 'btt', 'ember', 'subs-please', 'yameii', 'seadex',
-    'commie', 'coalgirls', 'kamigami', 'mtbb'
-  ];
+  // 1. الدلائل الصريحة لوบัง وجدت
+  if (strDump.includes('.ass') || strDump.includes('.ssa') || strDump.includes('[ass]') || strDump.includes('styled') || /\b(ass|ssa)\b/.test(strDump)) {
+    return true;
+  }
 
-  return checkTargets.some(str => {
-    // الفحص العادي للامتدادات
-    if (str.includes('.ass') || str.includes('.ssa') || str === 'ass' || str === 'ssa' || str.includes('styled') || str.includes('[ass]')) {
-      return true;
-    }
-    // الفحص الذكي: إذا اسم الإصدار تابع لفرقة أنمي، نعتبره ASS فوراً
-    if (animeGroups.some(group => str.includes(group))) {
-      return true;
-    }
-    return false;
-  });
+  // 2. إذا كان التصنيف أنمي، نفرض أنه ASS (لتفعيل محرك Nuvio، والـ index.js سيتدبر الباقي)
+  if (type === 'anime') return true;
+
+  // 3. فرق الأنمي المشهورة 
+  const animeGroups = ['erai', 'subsplease', 'horrible', 'judas', 'golumpa', 'ember', 'yameii', 'seadex', 'commie', 'vcb', 'nyaa', 'dame', 'mtbb'];
+  if (animeGroups.some(g => strDump.includes(g))) {
+    return true;
+  }
+
+  // 4. ميزة الأقواس المربعة الشائعة جداً بأسماء ملفات الأنمي
+  if (/\[.*?\]/.test(strDump)) {
+    return true;
+  }
+
+  return false;
 }
 
 async function fetchSubDLOfficial(imdbId, season, episode, type, apiKey) {
@@ -68,7 +64,7 @@ async function fetchSubDLOfficial(imdbId, season, episode, type, apiKey) {
     const params = new URLSearchParams({
       api_key: apiKey.trim(),
       imdb_id: imdbId,
-      languages: 'AR,EN'
+      languages: 'AR,EN' // نسحب لغتين ونفلتر لاحقاً لضمان عدم نقص النتائج
     });
 
     if (season) params.set('season_number', String(season));
@@ -89,7 +85,9 @@ async function fetchSubDLOfficial(imdbId, season, episode, type, apiKey) {
       const langRaw = (item.lang || item.language || 'Arabic').toLowerCase();
       const isAr = langRaw.startsWith('ar') || langRaw === 'ara';
       const releaseName = item.release_name || item.name || '';
-      const isAss = checkIsAssFormat(item);
+      
+      // تمرير الـ type للرادار
+      const isAss = checkIsAssFormat(item, type); 
 
       let dlUrl = item.url || '';
       if (dlUrl && !dlUrl.startsWith('http')) {
@@ -110,7 +108,7 @@ async function fetchSubDLOfficial(imdbId, season, episode, type, apiKey) {
         _episode: episode || 1,
         _priority: isAr ? (isAss ? 0 : 1) : 3
       };
-    }).filter(s => s.url);
+    }).filter(s => s.url && s.lang === 'ara'); // إبقاء الترجمات العربية فقط لتقليل الزحمة
   } catch (e) {
     return [];
   }
@@ -141,7 +139,7 @@ async function fetchSubDLStremTop(imdbId, season, episode, type, apiKey) {
     return list.map(item => {
       const langRaw = (item.lang || 'ara').toLowerCase();
       const isArabic = langRaw.startsWith('ar') || langRaw === 'ara';
-      const isAss = checkIsAssFormat(item);
+      const isAss = checkIsAssFormat(item, type);
       const cleanFormat = isAss ? 'ass' : 'srt';
 
       return {
@@ -152,10 +150,10 @@ async function fetchSubDLStremTop(imdbId, season, episode, type, apiKey) {
         fileName: item.id || '',
         origName: item.id || 'SubDL Strem',
         _source: 'subdl',
-        _isZip: false,
+        _isZip: false, 
         _priority: isArabic ? (isAss ? 0 : 2) : 3
       };
-    }).filter(s => s.url);
+    }).filter(s => s.url && s.lang === 'ara');
   } catch (err) {
     return [];
   }
@@ -175,8 +173,9 @@ async function fetchSubDLMirror(imdbId, season, episode, type) {
     );
 
     return (r.data?.subtitles || []).map(s => {
-      const isArabic = (s.lang || 'ara').toLowerCase().startsWith('ar');
-      const isAss = checkIsAssFormat(s);
+      const langRaw = (s.lang || 'ara').toLowerCase();
+      const isArabic = langRaw.startsWith('ar');
+      const isAss = checkIsAssFormat(s, type);
       const cleanFormat = isAss ? 'ass' : 'srt';
 
       return {
@@ -190,7 +189,7 @@ async function fetchSubDLMirror(imdbId, season, episode, type) {
         _isZip: false,
         _priority: isArabic ? (isAss ? 0 : 2) : 3
       };
-    });
+    }).filter(s => s.url && s.lang === 'ara');
   } catch (e) {
     return [];
   }
@@ -214,12 +213,12 @@ async function getSubDL({ imdbId, season, episode, type, apiKey }) {
     .flatMap(r => r.value)
     .filter(s => s && s.url);
 
-  // نظام فلترة لمنع تكرار نفس الترجمة من السيرفرات الثلاثة
+  // نظام فلترة لمنع تكرار نفس الترجمة من السيرفرات الثلاثة والإبقاء على النسخ الصافية
   const uniqueSubs = [];
   const seenUrls = new Set();
 
   for (const sub of allSubs) {
-    // توحيد الرابط لغرض الفلترة (إزالة بروتوكول http/https لحذف النسخ المتطابقة بدقة)
+    // توحيد الرابط لغرض الفلترة الدقيقة
     const cleanUrl = sub.url.replace(/^https?:\/\//, '').split('?')[0];
     if (seenUrls.has(cleanUrl)) continue;
     seenUrls.add(cleanUrl);
