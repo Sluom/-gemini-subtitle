@@ -671,8 +671,7 @@ app.get([
         url: finalUrl,
         lang: s.lang || 'ara',
         format: ext,
-        _priority: s._priority !== undefined ? s._priority : (isAssTrack ? 0 : 2),
-        _originalUrl: s.url // نحتفظ بالرابط الأصلي
+        _priority: s._priority !== undefined ? s._priority : (isAssTrack ? 0 : 2)
       };
     });
 
@@ -695,16 +694,16 @@ app.get([
     // --- إضافة نظام الترجمة بالذكاء الاصطناعي (Trans-SRT و Trans-ASS) ---
     const transSubs = [];
     
-    // البحث عن أفضل ملف ترجمة متوفر (يفضل الإنجليزي إذا وجد، وإلا أي ملف آخر)
-    let bestSourceForTranslation = uniqueSubs.find(s => (s.lang === 'eng' || s.lang === 'en') && s._originalUrl && !s._originalUrl.endsWith('.zip'));
+    // البحث عن أفضل ملف ترجمة متوفر (نستخدم رابط البروكسي `s.url` حتى يفك الضغط وينظف النص تلقائياً)
+    let bestSourceForTranslation = uniqueSubs.find(s => (s.lang === 'eng' || s.lang === 'en') && s.url);
     if (!bestSourceForTranslation) {
-        bestSourceForTranslation = uniqueSubs.find(s => s._originalUrl && !s._originalUrl.endsWith('.zip')); 
+        bestSourceForTranslation = uniqueSubs.find(s => s.url); 
     }
 
     if (bestSourceForTranslation) {
-      const sourceUrl = encodeURIComponent(bestSourceForTranslation._originalUrl);
+      // نرسل رابط البروكسي الجاهز للـ ai.js
+      const sourceUrl = encodeURIComponent(bestSourceForTranslation.url);
       
-      // بناء الروابط الأربعة وإعطاؤها أولوية 10 لتظهر في النهاية
       transSubs.push({
         id: `trans-srt-1`,
         url: `${baseUrl}/stream-ai.srt?url=${sourceUrl}`,
@@ -737,7 +736,6 @@ app.get([
     }
     // -----------------------------------------------------------
 
-    // دمج النتائج العادية أولاً، ثم روابط الذكاء الاصطناعي في النهاية
     const finalSubs = [...uniqueSubs, ...transSubs];
 
     res.json({ subtitles: finalSubs });
