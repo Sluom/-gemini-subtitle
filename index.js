@@ -671,7 +671,7 @@ app.get([
         lang: s.lang || 'ara',
         format: ext,
         _priority: s._priority !== undefined ? s._priority : (isAssTrack ? 0 : 2),
-        _originalUrl: s.url // نحتفظ بالرابط الأصلي
+        _originalUrl: s._originalUrl || s.url
       };
     });
 
@@ -691,47 +691,60 @@ app.get([
       return true;
     });
 
-    // --- إضافة نظام الترجمة بالذكاء الاصطناعي ---
+    // --- إضافة نظام الترجمة بالذكاء الاصطناعي (الطريقة المضمونة: إرسال النص الصافي برابط Base64) ---
     const transSubs = [];
     
-    // نرسل الرابط الأصلي مباشرة لملف ai.js وهو يتكفل بتحميله وفك ضغطه
-    let bestSourceForTranslation = uniqueSubs.find(s => (s.lang === 'eng' || s.lang === 'en') && s.url);
-    if (!bestSourceForTranslation) {
-        bestSourceForTranslation = uniqueSubs.find(s => s.url); 
-    }
+    // نختار أفضل ملف إنجليزي أو أي ملف آخر متاح للترجمة
+    let bestSource = uniqueSubs.find(s => (s.lang === 'eng' || s.lang === 'en') && s.url);
+    if (!bestSource) bestSource = uniqueSubs.find(s => s.url); 
 
-    if (bestSourceForTranslation) {
-      const sourceUrl = encodeURIComponent(bestSourceForTranslation.url);
+    if (bestSource) {
+      // راح نستخرج الرابط الداخلي للبروكسي اللي موجود أصلًا بـ `bestSource.url`
+      // هذا الرابط (مثل /stream-proxy أو /stream-os) جاهز لتحميل النص
+      let proxyUrl = bestSource.url;
       
-      transSubs.push({
-        id: `trans-srt-1`,
-        url: `${baseUrl}/stream-ai.srt?url=${sourceUrl}`,
-        lang: 'ara',
-        format: 'srt',
-        _priority: 10
-      });
-      transSubs.push({
-        id: `trans-srt-2`,
-        url: `${baseUrl}/stream-ai.srt?url=${sourceUrl}`,
-        lang: 'ara',
-        format: 'srt',
-        _priority: 10
-      });
+      // حتى نتجنب Timeout من Vercel أو Loop، راح نقوم بتحميل النص "هنـــــا" بداخل index.js
+      // ونحول النص بالكامل لـ Base64، وندزه لـ ai.js داخل الرابط!
+      try {
+          // جلب النص الصافي عبر الاتصال المحلي
+          const proxyRes = await axios.get(proxyUrl, { responseType: 'arraybuffer', timeout: 5000 });
+          const decodedText = fixArabicEncoding(Buffer.from(proxyRes.data)).toString('utf-8');
+          
+          // تحويل النص إلى Base64 آمن للروابط
+          const encodedContent = Buffer.from(decodedText).toString('base64');
 
-      transSubs.push({
-        id: `trans-ass-1`,
-        url: `${baseUrl}/stream-ai.ass?url=${sourceUrl}`,
-        lang: 'ara',
-        format: 'ass',
-        _priority: 11
-      });
-      transSubs.push({
-        id: `trans-ass-2`,
-        url: `${baseUrl}/stream-ai.ass?url=${sourceUrl}`,
-        lang: 'ara',
-        format: 'ass',
-        _priority: 11
-      });
+          transSubs.push({
+            id: `trans-srt-1`,
+            url: `${baseUrl}/stream-ai.srt?b64=${encodedContent}`,
+            lang: 'ara',
+            format: 'srt',
+            _priority: 10
+          });
+          transSubs.push({
+            id: `trans-srt-2`,
+            url: `${baseUrl}/stream-ai.srt?b64=${encodedContent}`,
+            lang: 'ara',
+            format: 'srt',
+            _priority: 10
+          });
+          transSubs.push({
+            id: `trans-ass-1`,
+            url: `${baseUrl}/stream-ai.ass?b64=${encodedContent}`,
+            lang: 'ara',
+            format: 'ass',
+            _priority: 11
+          });
+          transSubs.push({
+            id: `trans-ass-2`,
+            url: `${baseUrl}/stream-ai.ass?b64=${encodedContent}`,
+            lang: 'ara',
+            format: 'ass',
+            _priority: 11
+          });
+      } catch (fetchErr) {
+          console.error("Failed to pre-fetch subtitle for AI:", fetchErr.message);
+          // إذا فشل التحميل الاستباقي، ما نظهر روابط الترجمة حتى لا تطلع نقطة أو أخطاء
+      }
     }
     // -----------------------------------------------------------
 
@@ -743,24 +756,27 @@ app.get([
   }
 });
 
+// المسار الجديد للذكاء الاصطناعي: يستلم النص المجهز كـ Base64 ويترجمه فورًا
 app.all(['/stream-ai.srt', '/stream-ai.ass', '/stream-ai.ssa'], async (req, res) => {
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   
-  const targetUrl = req.query.url;
-  if (!targetUrl) return res.status(400).send('Missing URL for AI translation');
+  const b64Data = req.query.b64;
+  if (!b64Data) return res.status(400).send('Missing Base64 subtitle data');
 
   const config = parseConfig(req);
   const isAss = req.path.endsWith('.ass') || req.path.endsWith('.ssa');
 
   try {
+    // فك تشفير النص الصافي المستلم
+    const rawText = Buffer.from(b64Data, 'base64').toString('utf-8');
     let finalContent = '';
 
     if (isAss) {
-      finalContent = await handleTranslationAss(targetUrl, config);
+      finalContent = await handleTranslationAss(rawText, config);
       res.setHeader('Content-Type', 'text/x-ssa; charset=utf-8');
       res.setHeader('Content-Disposition', 'inline; filename="Trans-ASS.ssa"');
     } else {
-      finalContent = await handleTranslationSrt(targetUrl, config);
+      finalContent = await handleTranslationSrt(rawText, config);
       res.setHeader('Content-Type', 'application/x-subrip; charset=utf-8');
       res.setHeader('Content-Disposition', 'inline; filename="Trans-SRT.srt"');
     }
