@@ -1,7 +1,5 @@
 const axios = require('axios');
 const iconv = require('iconv-lite');
-const AdmZip = require('adm-zip');
-const zlib = require('zlib');
 
 // مفتاح ورابط APInex الثابت
 const APINEX_BASE_URL = 'https://api.apinex.bond/v1/chat/completions';
@@ -29,28 +27,6 @@ function srtTimeToAss(t) {
   const h = parseInt(m[1], 10);
   const cs = Math.floor(parseInt(m[4], 10) / 10).toString().padStart(2, '0');
   return `${h}:${m[2]}:${m[3]}.${cs}`;
-}
-
-function fixArabicEncoding(buffer) {
-  if (!buffer || !Buffer.isBuffer(buffer)) return buffer;
-  if (buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4b) return buffer;
-  if (buffer.length >= 2 && buffer[0] === 0xff && buffer[1] === 0xfe) {
-    try { return Buffer.from(iconv.decode(buffer, 'utf16-le'), 'utf-8'); } catch(e) {}
-  }
-  if (buffer.length >= 2 && buffer[0] === 0xfe && buffer[1] === 0xff) {
-    try { return Buffer.from(iconv.decode(buffer, 'utf16-be'), 'utf-8'); } catch(e) {}
-  }
-  const utf8Text = buffer.toString('utf-8');
-  if (/[\u0600-\u06FF]/.test(utf8Text)) return buffer;
-  try {
-    const decodedWin = iconv.decode(buffer, 'windows-1256');
-    if (/[\u0600-\u06FF]/.test(decodedWin)) return Buffer.from(decodedWin, 'utf-8');
-  } catch (e) {}
-  try {
-    const decodedIso = iconv.decode(buffer, 'iso-8859-6');
-    if (/[\u0600-\u06FF]/.test(decodedIso)) return Buffer.from(decodedIso, 'utf-8');
-  } catch (e) {}
-  return buffer;
 }
 
 function extractCuesUniversal(text) {
@@ -159,57 +135,7 @@ Input: ${JSON.stringify(texts)}`;
   return null;
 }
 
-async function fetchAndExtractSub(subUrl, keys) {
-    let response;
-    // فك التشفير عن الرابط المستلم فقط مرة واحدة هنا
-    const decodedUrl = decodeURIComponent(subUrl);
-    
-    // إذا كان الرابط يخص OpenSubtitles
-    if (decodedUrl.startsWith('os://')) {
-        const dataUrl = decodedUrl.replace('os://', 'http://dummy.com/');
-        const parsed = new URL(dataUrl);
-        const fileId = parseInt(parsed.pathname.replace('/', ''), 10);
-        const apiKey = keys.openSubtitlesKey || '';
-        
-        if (!fileId || !apiKey) throw new Error("Missing OpenSubtitles config");
-        
-        const dlRes = await axios.post(
-            'https://api.opensubtitles.com/api/v1/download',
-            { file_id: fileId },
-            { headers: { 'Api-Key': apiKey.trim(), 'User-Agent': 'NuvioSubtitles v1.0.0', 'Content-Type': 'application/json' }, timeout: 8000 }
-        );
-        const directLink = dlRes.data?.link;
-        if (!directLink) throw new Error("OS direct link not found");
-        
-        response = await axios.get(directLink, { responseType: 'arraybuffer', timeout: 15000 });
-    } else {
-        response = await axios.get(decodedUrl, { responseType: 'arraybuffer', timeout: 15000 });
-    }
-
-    let buffer = Buffer.from(response.data);
-    if (buffer.length >= 2 && buffer[0] === 0x1f && buffer[1] === 0x8b) {
-      buffer = zlib.gunzipSync(buffer);
-    }
-    if (buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4b) {
-      const zip = new AdmZip(buffer);
-      const entries = zip.getEntries();
-      const assEntry = entries.find(e => !e.isDirectory && (e.entryName.toLowerCase().endsWith('.ass') || e.entryName.toLowerCase().endsWith('.ssa')));
-      const subEntry = entries.find(e => !e.isDirectory && e.entryName.toLowerCase().endsWith('.srt'));
-      if (assEntry) buffer = assEntry.getData();
-      else if (subEntry) buffer = subEntry.getData();
-    }
-    return fixArabicEncoding(buffer).toString('utf-8');
-}
-
-async function handleTranslationSrt(subUrl, keys) {
-  let originalText = "";
-  try {
-      originalText = await fetchAndExtractSub(subUrl, keys);
-  } catch (e) {
-      console.error('[AI] Download Error (SRT):', e.message);
-      return "1\n00:00:01,000 --> 00:00:08,000\n[النظام] تعذر سحب الملف المصدر للترجمة.\n";
-  }
-
+async function handleTranslationSrt(originalText, keys) {
   const cues = extractCuesUniversal(originalText);
   if (!cues.length) return "1\n00:00:01,000 --> 00:00:08,000\n[النظام] تعذر استخراج النصوص للترجمة.\n";
 
@@ -239,15 +165,7 @@ async function handleTranslationSrt(subUrl, keys) {
   return srtOutput;
 }
 
-async function handleTranslationAss(subUrl, keys) {
-  let originalText = "";
-  try {
-      originalText = await fetchAndExtractSub(subUrl, keys);
-  } catch (e) {
-      console.error('[AI] Download Error (ASS):', e.message);
-      return ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[النظام] تعذر سحب الملف المصدر.`;
-  }
-
+async function handleTranslationAss(originalText, keys) {
   const cues = extractCuesUniversal(originalText);
   if (!cues.length) return ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[النظام] تعذر استخراج نصوص الترجمة المصدر.`;
 
