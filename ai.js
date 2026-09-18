@@ -6,7 +6,8 @@ const translationCache = new Map();
 // مفتاح ورابط APInex الثابت
 const APINEX_BASE_URL = 'https://api.apinex.bond/v1/chat/completions';
 const APINEX_API_KEY = 'sk-apxf8963dbb2a56ef32027e48d2168c34609153354867ceae7';
-const APINEX_MODEL = 'gemini-1.5-flash';
+// تغيير الموديل لأحد الموديلات المدعومة والمجانية في APInex
+const APINEX_MODEL = 'free/claude-sonnet-4.6'; 
 
 const ASS_DEFAULT_HEADER = `[Script Info]
 ScriptType: v4.00+
@@ -114,30 +115,35 @@ Rules:
 Length: ${texts.length}.
 Input: ${JSON.stringify(texts)}`;
 
-  // 1. استخدام APInex كمصدر أساسي للترجمة
+  // 1. استخدام APInex كمصدر أساسي بحماية قوية
   try {
     const r = await axios.post(
       APINEX_BASE_URL,
       {
         model: APINEX_MODEL,
-        messages: [{ role: 'user', content: prompt }],
-        response_format: { type: 'json_object' }
+        messages: [{ role: 'user', content: prompt }]
       },
       {
         headers: {
           Authorization: `Bearer ${APINEX_API_KEY}`,
           'Content-Type': 'application/json'
         },
-        timeout: 15000
+        timeout: 20000,
+        validateStatus: function (status) {
+          return status < 500; // حل مشكلة الـ Crash
+        }
       }
     );
-    const parsedArr = parseRobustJsonArray(r.data?.choices?.[0]?.message?.content, texts.length);
-    if (parsedArr && parsedArr.length > 0) return parsedArr;
+    
+    if (r.status === 200) {
+        const parsedArr = parseRobustJsonArray(r.data?.choices?.[0]?.message?.content, texts.length);
+        if (parsedArr && parsedArr.length > 0) return parsedArr;
+    }
   } catch (e) {
-    console.error('[APInex Translation Error]', e.message);
+    // تجاهل الخطأ بصمت لعدم إيقاف السيرفر
   }
 
-  // 2. استخدام Groq كبديل احتياطي في حال فشل APInex
+  // 2. البديل الاحتياطي (Groq)
   if (keys && keys.groqKey) {
     try {
       const r = await axios.post(
@@ -152,11 +158,14 @@ Input: ${JSON.stringify(texts)}`;
             Authorization: `Bearer ${keys.groqKey.trim()}`,
             'Content-Type': 'application/json'
           },
-          timeout: 10000
+          timeout: 10000,
+          validateStatus: function (status) { return status < 500; }
         }
       );
-      const parsedArr = parseRobustJsonArray(r.data?.choices?.[0]?.message?.content, texts.length);
-      if (parsedArr && parsedArr.length > 0) return parsedArr;
+      if (r.status === 200) {
+          const parsedArr = parseRobustJsonArray(r.data?.choices?.[0]?.message?.content, texts.length);
+          if (parsedArr && parsedArr.length > 0) return parsedArr;
+      }
     } catch (e) {}
   }
 
@@ -168,7 +177,13 @@ async function handleTranslationSrt(subUrl, keys) {
   const cacheKey = `${subUrl}_translated_ar_srt`;
   if (translationCache.has(cacheKey)) return translationCache.get(cacheKey);
 
-  const r = await axios.get(subUrl, { responseType: 'arraybuffer', timeout: 10000 });
+  let r;
+  try {
+      r = await axios.get(subUrl, { responseType: 'arraybuffer', timeout: 10000 });
+  } catch (e) {
+      return "1\n00:00:01,000 --> 00:00:08,000\n[النظام] تعذر سحب الملف المصدر.\n";
+  }
+
   const originalText = safeDecodeText(Buffer.from(r.data));
   const cues = extractCuesUniversal(originalText);
 
@@ -184,12 +199,11 @@ async function handleTranslationSrt(subUrl, keys) {
     return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : "ـ");
   });
 
-  const chunkResults = await runConcurrentPool(tasks, 3); // رفعنا سرعة المهام إلى 3 بسبب سرعة APInex
+  const chunkResults = await runConcurrentPool(tasks, 3);
   const finalTranslations = chunkResults.flat();
   
   let srtOutput = '';
   cues.forEach((c, idx) => {
-    // تحويل توقيت ASS (الناتج من extractCuesUniversal) إلى SRT
     let sTime = c.start.replace('.', ',');
     let eTime = c.end.replace('.', ',');
     if (sTime.length === 10) sTime = '0' + sTime;
@@ -204,12 +218,18 @@ async function handleTranslationSrt(subUrl, keys) {
   return srtOutput;
 }
 
-// دالة لتوليد ترجمة ASS (الكود الأصلي مالتك)
+// دالة لتوليد ترجمة ASS
 async function handleTranslationAss(subUrl, keys) {
   const cacheKey = `${subUrl}_translated_ar_ass`;
   if (translationCache.has(cacheKey)) return translationCache.get(cacheKey);
 
-  const r = await axios.get(subUrl, { responseType: 'arraybuffer', timeout: 10000 });
+  let r;
+  try {
+      r = await axios.get(subUrl, { responseType: 'arraybuffer', timeout: 10000 });
+  } catch (e) {
+      return ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[النظام] تعذر سحب الملف المصدر.`;
+  }
+
   const originalText = safeDecodeText(Buffer.from(r.data));
   const cues = extractCuesUniversal(originalText);
 
@@ -225,7 +245,7 @@ async function handleTranslationAss(subUrl, keys) {
     return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : "ـ");
   });
 
-  const chunkResults = await runConcurrentPool(tasks, 3); // رفعنا سرعة المهام إلى 3
+  const chunkResults = await runConcurrentPool(tasks, 3);
   const finalTranslations = chunkResults.flat();
   const assLines = cues.map((c, idx) => `Dialogue: 0,${c.start},${c.end},Default,,0,0,0,,${finalTranslations[idx] || 'ـ'}`);
 
