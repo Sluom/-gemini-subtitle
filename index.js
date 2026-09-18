@@ -11,7 +11,6 @@ const { getSubDL } = require('./subdl');
 const { getSubSource, fetchSubSourceBuffer } = require('./subsource');
 const { getAnimeSubtitles } = require('./anime');
 
-// استدعاء دوال الذكاء الاصطناعي الجديدة
 const { handleTranslationSrt, handleTranslationAss } = require('./ai');
 
 let getWyzie = null;
@@ -551,6 +550,9 @@ app.get(['/manifest.json', '/:config/manifest.json'], (req, res) => {
   res.json(manifest);
 });
 
+// متغير عالمي لحفظ النصوص خام قبل الترجمة لتفادي مشاكل الـ URL الداخلي
+const globalSubTextCache = new Map();
+
 app.get([
   '/subtitles/:type/:id', 
   '/subtitles/:type/:id/:extra',
@@ -671,7 +673,8 @@ app.get([
         url: finalUrl,
         lang: s.lang || 'ara',
         format: ext,
-        _priority: s._priority !== undefined ? s._priority : (isAssTrack ? 0 : 2)
+        _priority: s._priority !== undefined ? s._priority : (isAssTrack ? 0 : 2),
+        _originalUrl: s.url // نحتفظ بالرابط الأصلي
       };
     });
 
@@ -691,44 +694,50 @@ app.get([
       return true;
     });
 
-    // --- إضافة نظام الترجمة بالذكاء الاصطناعي (Trans-SRT و Trans-ASS) ---
+    // --- إضافة نظام الترجمة بالذكاء الاصطناعي بطريقة آمنة بدون Proxy Loop ---
     const transSubs = [];
     
-    // البحث عن أفضل ملف ترجمة متوفر (نستخدم رابط البروكسي `s.url` حتى يفك الضغط وينظف النص تلقائياً)
-    let bestSourceForTranslation = uniqueSubs.find(s => (s.lang === 'eng' || s.lang === 'en') && s.url);
-    if (!bestSourceForTranslation) {
-        bestSourceForTranslation = uniqueSubs.find(s => s.url); 
-    }
+    let bestSource = uniqueSubs.find(s => (s.lang === 'eng' || s.lang === 'en') && s.url);
+    if (!bestSource) bestSource = uniqueSubs.find(s => s.url); 
 
-    if (bestSourceForTranslation) {
-      // نرسل رابط البروكسي الجاهز للـ ai.js
-      const sourceUrl = encodeURIComponent(bestSourceForTranslation.url);
+    if (bestSource) {
+      // نرسل الرابط لمحرك التحميل الداخلي، وبعدين نعطيه للذكاء الاصطناعي كنص جاهز
+      const downloadProxyUrl = bestSource.url;
+      const cacheId = `ai_raw_${targetId}`; 
       
+      // نبدأ التحميل بالخلفية ونحفظ النص الصافي بالذاكرة 
+      axios.get(downloadProxyUrl, { responseType: 'arraybuffer', timeout: 15000 }).then(r => {
+         const decoded = fixArabicEncoding(Buffer.from(r.data));
+         const text = decoded.toString('utf-8');
+         globalSubTextCache.set(cacheId, text);
+      }).catch(e => {
+         globalSubTextCache.set(cacheId, "ERROR");
+      });
+
       transSubs.push({
         id: `trans-srt-1`,
-        url: `${baseUrl}/stream-ai.srt?url=${sourceUrl}`,
+        url: `${baseUrl}/stream-ai.srt?id=${cacheId}`,
         lang: 'ara',
         format: 'srt',
         _priority: 10
       });
       transSubs.push({
         id: `trans-srt-2`,
-        url: `${baseUrl}/stream-ai.srt?url=${sourceUrl}`,
+        url: `${baseUrl}/stream-ai.srt?id=${cacheId}`,
         lang: 'ara',
         format: 'srt',
         _priority: 10
       });
-
       transSubs.push({
         id: `trans-ass-1`,
-        url: `${baseUrl}/stream-ai.ass?url=${sourceUrl}`,
+        url: `${baseUrl}/stream-ai.ass?id=${cacheId}`,
         lang: 'ara',
         format: 'ass',
         _priority: 11
       });
       transSubs.push({
         id: `trans-ass-2`,
-        url: `${baseUrl}/stream-ai.ass?url=${sourceUrl}`,
+        url: `${baseUrl}/stream-ai.ass?id=${cacheId}`,
         lang: 'ara',
         format: 'ass',
         _priority: 11
@@ -744,24 +753,29 @@ app.get([
   }
 });
 
+// المسار الجديد للذكاء الاصطناعي يعتمد على النص الجاهز بالذاكرة
 app.all(['/stream-ai.srt', '/stream-ai.ass', '/stream-ai.ssa'], async (req, res) => {
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   
-  const targetUrl = req.query.url;
-  if (!targetUrl) return res.status(400).send('Missing URL for AI translation');
+  const cacheId = req.query.id;
+  if (!cacheId) return res.status(400).send('Missing ID');
 
   const config = parseConfig(req);
   const isAss = req.path.endsWith('.ass') || req.path.endsWith('.ssa');
+  
+  const rawText = globalSubTextCache.get(cacheId);
+  
+  if (!rawText) return res.status(404).send('1\n00:00:01,000 --> 00:00:08,000\n[النظام] الترجمة قيد التجهيز.. أعد المحاولة بعد قليل.\n');
+  if (rawText === "ERROR") return res.status(500).send('1\n00:00:01,000 --> 00:00:08,000\n[النظام] فشل في سحب الملف الأصلي للترجمة.\n');
 
   try {
     let finalContent = '';
-
     if (isAss) {
-      finalContent = await handleTranslationAss(targetUrl, config);
+      finalContent = await handleTranslationAss(rawText, config);
       res.setHeader('Content-Type', 'text/x-ssa; charset=utf-8');
       res.setHeader('Content-Disposition', 'inline; filename="Trans-ASS.ssa"');
     } else {
-      finalContent = await handleTranslationSrt(targetUrl, config);
+      finalContent = await handleTranslationSrt(rawText, config);
       res.setHeader('Content-Type', 'application/x-subrip; charset=utf-8');
       res.setHeader('Content-Disposition', 'inline; filename="Trans-SRT.srt"');
     }
