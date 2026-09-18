@@ -550,9 +550,6 @@ app.get(['/manifest.json', '/:config/manifest.json'], (req, res) => {
   res.json(manifest);
 });
 
-// متغير عالمي لحفظ النصوص خام قبل الترجمة لتفادي مشاكل الـ URL الداخلي
-const globalSubTextCache = new Map();
-
 app.get([
   '/subtitles/:type/:id', 
   '/subtitles/:type/:id/:extra',
@@ -674,7 +671,7 @@ app.get([
         lang: s.lang || 'ara',
         format: ext,
         _priority: s._priority !== undefined ? s._priority : (isAssTrack ? 0 : 2),
-        _originalUrl: s.url // نحتفظ بالرابط الأصلي
+        _originalUrl: s._originalUrl || s.url
       };
     });
 
@@ -694,50 +691,43 @@ app.get([
       return true;
     });
 
-    // --- إضافة نظام الترجمة بالذكاء الاصطناعي بطريقة آمنة بدون Proxy Loop ---
+    // --- إضافة نظام الترجمة بالذكاء الاصطناعي ---
     const transSubs = [];
     
-    let bestSource = uniqueSubs.find(s => (s.lang === 'eng' || s.lang === 'en') && s.url);
-    if (!bestSource) bestSource = uniqueSubs.find(s => s.url); 
+    // نرسل الرابط الأصلي مباشرة لملف ai.js وهو يتكفل بتحميله وفك ضغطه
+    let bestSourceForTranslation = uniqueSubs.find(s => (s.lang === 'eng' || s.lang === 'en') && s._originalUrl);
+    if (!bestSourceForTranslation) {
+        bestSourceForTranslation = uniqueSubs.find(s => s._originalUrl); 
+    }
 
-    if (bestSource) {
-      // نرسل الرابط لمحرك التحميل الداخلي، وبعدين نعطيه للذكاء الاصطناعي كنص جاهز
-      const downloadProxyUrl = bestSource.url;
-      const cacheId = `ai_raw_${targetId}`; 
+    if (bestSourceForTranslation) {
+      const sourceUrl = encodeURIComponent(bestSourceForTranslation._originalUrl);
       
-      // نبدأ التحميل بالخلفية ونحفظ النص الصافي بالذاكرة 
-      axios.get(downloadProxyUrl, { responseType: 'arraybuffer', timeout: 15000 }).then(r => {
-         const decoded = fixArabicEncoding(Buffer.from(r.data));
-         const text = decoded.toString('utf-8');
-         globalSubTextCache.set(cacheId, text);
-      }).catch(e => {
-         globalSubTextCache.set(cacheId, "ERROR");
-      });
-
       transSubs.push({
         id: `trans-srt-1`,
-        url: `${baseUrl}/stream-ai.srt?id=${cacheId}`,
+        url: `${baseUrl}/stream-ai.srt?url=${sourceUrl}`,
         lang: 'ara',
         format: 'srt',
         _priority: 10
       });
       transSubs.push({
         id: `trans-srt-2`,
-        url: `${baseUrl}/stream-ai.srt?id=${cacheId}`,
+        url: `${baseUrl}/stream-ai.srt?url=${sourceUrl}`,
         lang: 'ara',
         format: 'srt',
         _priority: 10
       });
+
       transSubs.push({
         id: `trans-ass-1`,
-        url: `${baseUrl}/stream-ai.ass?id=${cacheId}`,
+        url: `${baseUrl}/stream-ai.ass?url=${sourceUrl}`,
         lang: 'ara',
         format: 'ass',
         _priority: 11
       });
       transSubs.push({
         id: `trans-ass-2`,
-        url: `${baseUrl}/stream-ai.ass?id=${cacheId}`,
+        url: `${baseUrl}/stream-ai.ass?url=${sourceUrl}`,
         lang: 'ara',
         format: 'ass',
         _priority: 11
@@ -753,29 +743,24 @@ app.get([
   }
 });
 
-// المسار الجديد للذكاء الاصطناعي يعتمد على النص الجاهز بالذاكرة
 app.all(['/stream-ai.srt', '/stream-ai.ass', '/stream-ai.ssa'], async (req, res) => {
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   
-  const cacheId = req.query.id;
-  if (!cacheId) return res.status(400).send('Missing ID');
+  const targetUrl = req.query.url;
+  if (!targetUrl) return res.status(400).send('Missing URL for AI translation');
 
   const config = parseConfig(req);
   const isAss = req.path.endsWith('.ass') || req.path.endsWith('.ssa');
-  
-  const rawText = globalSubTextCache.get(cacheId);
-  
-  if (!rawText) return res.status(404).send('1\n00:00:01,000 --> 00:00:08,000\n[النظام] الترجمة قيد التجهيز.. أعد المحاولة بعد قليل.\n');
-  if (rawText === "ERROR") return res.status(500).send('1\n00:00:01,000 --> 00:00:08,000\n[النظام] فشل في سحب الملف الأصلي للترجمة.\n');
 
   try {
     let finalContent = '';
+
     if (isAss) {
-      finalContent = await handleTranslationAss(rawText, config);
+      finalContent = await handleTranslationAss(targetUrl, config);
       res.setHeader('Content-Type', 'text/x-ssa; charset=utf-8');
       res.setHeader('Content-Disposition', 'inline; filename="Trans-ASS.ssa"');
     } else {
-      finalContent = await handleTranslationSrt(rawText, config);
+      finalContent = await handleTranslationSrt(targetUrl, config);
       res.setHeader('Content-Type', 'application/x-subrip; charset=utf-8');
       res.setHeader('Content-Disposition', 'inline; filename="Trans-SRT.srt"');
     }
@@ -1013,3 +998,9 @@ if (process.env.NODE_ENV !== 'production') {
 }
 
 module.exports = app;
+
+تأكد من هذا التعديل اللي سويناه مال
+const transSubs = []; // نرسل الرابط الأصلي مباشرة لملف ai.js وهو يتكفل بتحميله وفك ضغطه let bestSourceForTranslation = uniqueSubs.find(s => (s.lang === 'eng' || s.lang === 'en') && s._originalUrl); if (!bestSourceForTranslation) { bestSourceForTranslation = uniqueSubs.find(s => s._originalUrl); } if (bestSourceForTranslation) { const sourceUrl = encodeURIComponent(bestSourceForTranslation._originalUrl); transSubs.push({ id: `trans-srt-1`, url: `${baseUrl}/stream-ai.srt?url=${sourceUrl}`, lang: 'ara', format: 'srt', _priority: 10 }); transSubs.push({ id: `trans-srt-2`, url: `${baseUrl}/stream-ai.srt?url=${sourceUrl}`, lang: 'ara', format: 'srt', _priority: 10 }); transSubs.push({ id: `trans-ass-1`, url: `${baseUrl}/stream-ai.ass?url=${sourceUrl}`, lang: 'ara', format: 'ass', _priority: 11 }); transSubs.push({ id: `trans-ass-2`, url: `${baseUrl}/stream-ai.ass?url=${sourceUrl}`, lang: 'ara', format: 'ass', _priority: 11 }); }
+
+اريد كل شي سليم من ترفع ل اي اي لا تخلي ديكود قبل كود سورس وتجربة انت تسوي خطأ ما ينتبه عليه اله العباقرة مثلكم
+راجع كل التعديلات واعملي الكودين النهائيين
