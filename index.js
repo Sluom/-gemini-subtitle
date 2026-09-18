@@ -11,7 +11,7 @@ const { getSubDL } = require('./subdl');
 const { getSubSource, fetchSubSourceBuffer } = require('./subsource');
 const { getAnimeSubtitles } = require('./anime');
 
-// ط§ط³طھط¯ط¹ط§ط، ط¯ظˆط§ظ„ ط§ظ„ط°ظƒط§ط، ط§ظ„ط§طµط·ظ†ط§ط¹ظٹ ط§ظ„ط¬ط¯ظٹط¯ط©
+// استدعاء دوال الذكاء الاصطناعي الجديدة
 const { handleTranslationSrt, handleTranslationAss } = require('./ai');
 
 let getWyzie = null;
@@ -186,7 +186,7 @@ function detectFormat(s) {
 app.post('/api/test-key', async (req, res) => {
   const { provider, key } = req.body;
   if (!key || !key.trim()) {
-    return res.json({ success: false, message: 'ظٹط±ط¬ظ‰ ط¥ط¯ط®ط§ظ„ ط§ظ„ظ…ظپطھط§ط­ ط£ظˆظ„ط§ظ‹ âڑ ï¸ڈ', status: 'warn' });
+    return res.json({ success: false, message: 'يرجى إدخال المفتاح أولاً ⚠️', status: 'warn' });
   }
 
   const cleanKey = key.trim();
@@ -194,13 +194,13 @@ app.post('/api/test-key', async (req, res) => {
   try {
     if (provider === 'gemini') {
       const r = await axios.get(`https://generativelanguage.googleapis.com/v1beta/models?key=${cleanKey}`, { timeout: 7000 });
-      if (r.status === 200) return res.json({ success: true, message: 'ظ…ظپطھط§ط­ Gemini طµط§ظ„ط­ 100% âœ…' });
+      if (r.status === 200) return res.json({ success: true, message: 'مفتاح Gemini صالح 100% ✅' });
     } else if (provider === 'groq') {
       const r = await axios.get('https://api.groq.com/openai/v1/models', {
         headers: { 'Authorization': `Bearer ${cleanKey}` },
         timeout: 7000
       });
-      if (r.status === 200) return res.json({ success: true, message: 'ظ…ظپطھط§ط­ Groq طµط§ظ„ط­ 100% âœ…' });
+      if (r.status === 200) return res.json({ success: true, message: 'مفتاح Groq صالح 100% ✅' });
     } else if (provider === 'deepl') {
       let valid = false;
       try {
@@ -216,25 +216,25 @@ app.post('/api/test-key', async (req, res) => {
         });
         if (r2.status === 200) valid = true;
       }
-      if (valid) return res.json({ success: true, message: 'ظ…ظپطھط§ط­ DeepL طµط§ظ„ط­ 100% âœ…' });
+      if (valid) return res.json({ success: true, message: 'مفتاح DeepL صالح 100% ✅' });
     } else if (provider === 'openai') {
       const r = await axios.get('https://api.openai.com/v1/models', {
         headers: { 'Authorization': `Bearer ${cleanKey}` },
         timeout: 7000
       });
-      if (r.status === 200) return res.json({ success: true, message: 'ظ…ظپطھط§ط­ OpenAI طµط§ظ„ط­ 100% âœ…' });
+      if (r.status === 200) return res.json({ success: true, message: 'مفتاح OpenAI صالح 100% ✅' });
     } else if (provider === 'jimaku') {
       const r = await axios.get('https://jimaku.cc/api/entries/search?query=naruto', {
         headers: { 'Authorization': cleanKey },
         timeout: 7000
       });
-      if (r.status === 200) return res.json({ success: true, message: 'ظ…ظپطھط§ط­ Jimaku طµط§ظ„ط­ 100% âœ…' });
+      if (r.status === 200) return res.json({ success: true, message: 'مفتاح Jimaku صالح 100% ✅' });
     } else if (provider === 'subsource') {
       const r = await axios.get('https://api.subsource.net/api/v1/movies/search?q=avatar&searchType=text', {
         headers: { 'X-API-Key': cleanKey },
         timeout: 7000
       });
-      if (r.status === 200) return res.json({ success: true, message: 'ظ…ظپطھط§ط­ SubSource طµط§ظ„ط­ 100% âœ…' });
+      if (r.status === 200) return res.json({ success: true, message: 'مفتاح SubSource صالح 100% ✅' });
     } else if (provider === 'opensubtitles') {
       let valid = false;
       try {
@@ -255,7 +255,7 @@ app.post('/api/test-key', async (req, res) => {
         } catch (e2) {}
       }
 
-      if (valid) return res.json({ success: true, message: 'ظ…ظپطھط§ط­ OpenSubtitles طµط§ظ„ط­ 100% âœ…' });
+      if (valid) return res.json({ success: true, message: 'مفتاح OpenSubtitles صالح 100% ✅' });
     } else if (provider === 'subdl') {
       let valid = false;
       try {
@@ -276,15 +276,15 @@ app.post('/api/test-key', async (req, res) => {
         } catch (e2) {}
       }
 
-      if (valid) return res.json({ success: true, message: 'ظ…ظپطھط§ط­ SubDL طµط§ظ„ط­ 100% âœ…' });
+      if (valid) return res.json({ success: true, message: 'مفتاح SubDL صالح 100% ✅' });
     } else if (provider === 'wyzie') {
-      if (cleanKey.length > 10) return res.json({ success: true, message: 'ظ…ظپطھط§ط­ Wyzie Subs طµط§ظ„ط­ 100% âœ…' });
+      if (cleanKey.length > 10) return res.json({ success: true, message: 'مفتاح Wyzie Subs صالح 100% ✅' });
     }
 
-    return res.json({ success: false, message: 'ط§ظ„ظ…ظپطھط§ط­ ط؛ظٹط± طµط§ظ„ط­ ط£ظˆ ط§ظ†طھظ‡طھ طµظ„ط§ط­ظٹطھظ‡ â‌Œ', status: 'error' });
+    return res.json({ success: false, message: 'المفتاح غير صالح أو انتهت صلاحيته ❌', status: 'error' });
   } catch (err) {
     const errorDetail = err.response?.data?.error?.message || err.response?.data?.message || err.message || 'Service unavailable';
-    return res.json({ success: false, message: `ظپط´ظ„ ط§ظ„ظپط­طµ: ${errorDetail} â‌Œ`, status: 'error' });
+    return res.json({ success: false, message: `فشل الفحص: ${errorDetail} ❌`, status: 'error' });
   }
 });
 
@@ -294,7 +294,7 @@ function renderHtml(config) {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>ط¥ط¹ط¯ط§ط¯ط§طھ ظƒط§ظپط© ظ…ظˆط§ظ‚ط¹ ظˆظ…ظپط§طھظٹط­ ط§ظ„طھط±ط¬ظ…ط©</title>
+  <title>إعدادات كافة مواقع ومفاتيح الترجمة</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
     body { background-color: #0b1120; color: #f1f5f9; display: flex; justify-content: center; padding: 20px 10px 40px; }
@@ -325,125 +325,125 @@ function renderHtml(config) {
 </head>
 <body>
   <div class="container">
-    <h1 class="main-title">ط¥ط¹ط¯ط§ط¯ط§طھ ظƒط§ظپط© ظ…ظˆط§ظ‚ط¹ ظˆظ…ظپط§طھظٹط­ ط§ظ„طھط±ط¬ظ…ط©</h1>
+    <h1 class="main-title">إعدادات كافة مواقع ومفاتيح الترجمة</h1>
 
-    <h2 class="section-title">ًں¤– ظ…ط­ط±ظƒط§طھ ط§ظ„ط°ظƒط§ط، ط§ظ„ط§طµط·ظ†ط§ط¹ظٹ (ط§ظ„طھط±ط¬ظ…ط© ط§ظ„ظپظˆط±ظٹط©)</h2>
+    <h2 class="section-title">🤖 محركات الذكاء الاصطناعي (الترجمة الفورية)</h2>
 
     <div class="card">
       <div class="card-header">
-        <span class="card-label">ظ…ظپطھط§ط­ Google Gemini API:</span>
-        <a href="https://aistudio.google.com/app/apikey" target="_blank" class="btn-get">ط§ط­طµظ„ ط¹ظ„ظ‰ ط§ظ„ظ…ظپطھط§ط­ ًں”—</a>
+        <span class="card-label">مفتاح Google Gemini API:</span>
+        <a href="https://aistudio.google.com/app/apikey" target="_blank" class="btn-get">احصل على المفتاح 🔗</a>
       </div>
       <div class="input-row">
         <input type="text" id="geminiKey" class="input-field" placeholder="Google Gemini API Key" value="${config.geminiKey || ''}">
-        <button class="btn-check" onclick="checkKey('gemini')">ظپط­طµ</button>
+        <button class="btn-check" onclick="checkKey('gemini')">فحص</button>
       </div>
       <div id="status-gemini" class="status-box"></div>
     </div>
 
     <div class="card">
       <div class="card-header">
-        <span class="card-label">ظ…ظپطھط§ط­ Groq API (ظپط§ط¦ظ‚ ط§ظ„ط³ط±ط¹ط©):</span>
-        <a href="https://console.groq.com/keys" target="_blank" class="btn-get">ط§ط­طµظ„ ط¹ظ„ظ‰ ط§ظ„ظ…ظپطھط§ط­ ًں”—</a>
+        <span class="card-label">مفتاح Groq API (فائق السرعة):</span>
+        <a href="https://console.groq.com/keys" target="_blank" class="btn-get">احصل على المفتاح 🔗</a>
       </div>
       <div class="input-row">
         <input type="text" id="groqKey" class="input-field" placeholder="Groq API Key" value="${config.groqKey || ''}">
-        <button class="btn-check" onclick="checkKey('groq')">ظپط­طµ</button>
+        <button class="btn-check" onclick="checkKey('groq')">فحص</button>
       </div>
       <div id="status-groq" class="status-box"></div>
     </div>
 
     <div class="card">
       <div class="card-header">
-        <span class="card-label">ظ…ظپطھط§ط­ DeepL API:</span>
-        <a href="https://www.deepl.com/your-account/keys" target="_blank" class="btn-get">ط§ط­طµظ„ ط¹ظ„ظ‰ ط§ظ„ظ…ظپطھط§ط­ ًں”—</a>
+        <span class="card-label">مفتاح DeepL API:</span>
+        <a href="https://www.deepl.com/your-account/keys" target="_blank" class="btn-get">احصل على المفتاح 🔗</a>
       </div>
       <div class="input-row">
         <input type="text" id="deeplKey" class="input-field" placeholder="DeepL API Key" value="${config.deeplKey || ''}">
-        <button class="btn-check" onclick="checkKey('deepl')">ظپط­طµ</button>
+        <button class="btn-check" onclick="checkKey('deepl')">فحص</button>
       </div>
       <div id="status-deepl" class="status-box"></div>
     </div>
 
     <div class="card">
       <div class="card-header">
-        <span class="card-label">ظ…ظپطھط§ط­ OpenAI API:</span>
-        <a href="https://platform.openai.com/api-keys" target="_blank" class="btn-get">ط§ط­طµظ„ ط¹ظ„ظ‰ ط§ظ„ظ…ظپطھط§ط­ ًں”—</a>
+        <span class="card-label">مفتاح OpenAI API:</span>
+        <a href="https://platform.openai.com/api-keys" target="_blank" class="btn-get">احصل على المفتاح 🔗</a>
       </div>
       <div class="input-row">
         <input type="text" id="openAIKey" class="input-field" placeholder="OpenAI API Key" value="${config.openAIKey || ''}">
-        <button class="btn-check" onclick="checkKey('openai')">ظپط­طµ</button>
+        <button class="btn-check" onclick="checkKey('openai')">فحص</button>
       </div>
       <div id="status-openai" class="status-box"></div>
     </div>
 
-    <h2 class="section-title">ًںژŒ ظ…ظˆط§ظ‚ط¹ ظˆظ…طµط§ط¯ط± طھط±ط¬ظ…ط§طھ ط§ظ„ط£ظ†ظ…ظٹ ط§ظ„طھط®طµطµظٹط©</h2>
+    <h2 class="section-title">🎌 مواقع ومصادر ترجمات الأنمي التخصصية</h2>
 
     <div class="card">
       <div class="card-header">
-        <span class="card-label">ظ…ظپطھط§ط­ Jimaku.cc API (ط§ط®طھظٹط§ط±ظٹ ظ„ظ„ط£ظ†ظ…ظٹ):</span>
-        <a href="https://jimaku.cc/" target="_blank" class="btn-get">ط§ط­طµظ„ ط¹ظ„ظ‰ ط§ظ„ظ…ظپطھط§ط­ ًں”—</a>
+        <span class="card-label">مفتاح Jimaku.cc API (اختياري للأنمي):</span>
+        <a href="https://jimaku.cc/" target="_blank" class="btn-get">احصل على المفتاح 🔗</a>
       </div>
       <div class="input-row">
         <input type="text" id="jimakuKey" class="input-field" placeholder="Jimaku API Token" value="${config.jimakuKey || ''}">
-        <button class="btn-check" onclick="checkKey('jimaku')">ظپط­طµ</button>
+        <button class="btn-check" onclick="checkKey('jimaku')">فحص</button>
       </div>
       <div id="status-jimaku" class="status-box"></div>
     </div>
 
-    <h2 class="section-title">ًںŒگ ظ‚ظˆط§ط¹ط¯ ط¨ظٹط§ظ†ط§طھ ظˆظ…ط²ظˆط¯ط§طھ ط§ظ„طھط±ط¬ظ…ط© ط§ظ„ط¹ط§ظ…ط©</h2>
+    <h2 class="section-title">🌐 قواعد بيانات ومزودات الترجمة العامة</h2>
 
     <div class="card">
       <div class="card-header">
-        <span class="card-label">ظ…ظپطھط§ط­ SubSource API:</span>
-        <a href="https://subsource.net/" target="_blank" class="btn-get">ط§ط­طµظ„ ط¹ظ„ظ‰ ط§ظ„ظ…ظپطھط§ط­ ًں”—</a>
+        <span class="card-label">مفتاح SubSource API:</span>
+        <a href="https://subsource.net/" target="_blank" class="btn-get">احصل على المفتاح 🔗</a>
       </div>
       <div class="input-row">
         <input type="text" id="subsourceKey" class="input-field" placeholder="SubSource API Key" value="${config.subsourceKey || ''}">
-        <button class="btn-check" onclick="checkKey('subsource')">ظپط­طµ</button>
+        <button class="btn-check" onclick="checkKey('subsource')">فحص</button>
       </div>
       <div id="status-subsource" class="status-box"></div>
     </div>
 
     <div class="card">
       <div class="card-header">
-        <span class="card-label">ظ…ظپطھط§ط­ OpenSubtitles.com API:</span>
-        <a href="https://www.opensubtitles.com/en/consumers" target="_blank" class="btn-get">ط§ط­طµظ„ ط¹ظ„ظ‰ ط§ظ„ظ…ظپطھط§ط­ ًں”—</a>
+        <span class="card-label">مفتاح OpenSubtitles.com API:</span>
+        <a href="https://www.opensubtitles.com/en/consumers" target="_blank" class="btn-get">احصل على المفتاح 🔗</a>
       </div>
       <div class="input-row">
         <input type="text" id="openSubtitlesKey" class="input-field" placeholder="OpenSubtitles API Key" value="${config.openSubtitlesKey || ''}">
-        <button class="btn-check" onclick="checkKey('opensubtitles')">ظپط­طµ</button>
+        <button class="btn-check" onclick="checkKey('opensubtitles')">فحص</button>
       </div>
       <div id="status-opensubtitles" class="status-box"></div>
     </div>
 
     <div class="card">
       <div class="card-header">
-        <span class="card-label">ظ…ظپطھط§ط­ SubDL API:</span>
-        <a href="https://subdl.com/panel/api" target="_blank" class="btn-get">ط§ط­طµظ„ ط¹ظ„ظ‰ ط§ظ„ظ…ظپطھط§ط­ ًں”—</a>
+        <span class="card-label">مفتاح SubDL API:</span>
+        <a href="https://subdl.com/panel/api" target="_blank" class="btn-get">احصل على المفتاح 🔗</a>
       </div>
       <div class="input-row">
         <input type="text" id="subdlKey" class="input-field" placeholder="SubDL API Key" value="${config.subdlKey || ''}">
-        <button class="btn-check" onclick="checkKey('subdl')">ظپط­طµ</button>
+        <button class="btn-check" onclick="checkKey('subdl')">فحص</button>
       </div>
       <div id="status-subdl" class="status-box"></div>
     </div>
 
     <div class="card">
       <div class="card-header">
-        <span class="card-label">ظ…ظپطھط§ط­ Wyzie Subs API:</span>
-        <a href="https://store.wyzie.io/" target="_blank" class="btn-get">ط§ط­طµظ„ ط¹ظ„ظ‰ ط§ظ„ظ…ظپطھط§ط­ ًں”—</a>
+        <span class="card-label">مفتاح Wyzie Subs API:</span>
+        <a href="https://store.wyzie.io/" target="_blank" class="btn-get">احصل على المفتاح 🔗</a>
       </div>
       <div class="input-row">
         <input type="text" id="wyzieKey" class="input-field" placeholder="Wyzie Subs API Key" value="${config.wyzieKey || ''}">
-        <button class="btn-check" onclick="checkKey('wyzie')">ظپط­طµ</button>
+        <button class="btn-check" onclick="checkKey('wyzie')">فحص</button>
       </div>
       <div id="status-wyzie" class="status-box"></div>
     </div>
 
     <div class="actions">
-      <button class="btn-action btn-install" onclick="installAddon()">طھط«ط¨ظٹطھ ط§ظ„ط¥ط¶ط§ظپط© ظپظٹ Nuvio ظˆ Stremio ًںڑ€</button>
-      <button id="copyBtn" class="btn-action btn-copy" style="display: none;" onclick="copyManifestUrl()">ظ†ط³ط® ط±ط§ط¨ط· ط§ظ„ظ…ط§ظ†ظٹظپط³طھ (Manifest URL) ًں“‹</button>
+      <button class="btn-action btn-install" onclick="installAddon()">تثبيت الإضافة في Nuvio و Stremio 🚀</button>
+      <button id="copyBtn" class="btn-action btn-copy" style="display: none;" onclick="copyManifestUrl()">نسخ رابط المانيفست (Manifest URL) 📋</button>
     </div>
   </div>
 
@@ -462,7 +462,7 @@ function renderHtml(config) {
 
       statusEl.className = 'status-box';
       statusEl.style.display = 'block';
-      statusEl.innerText = 'ط¬ط§ط±ظچ ط§ظ„ظپط­طµ...';
+      statusEl.innerText = 'جارٍ الفحص...';
 
       try {
         const res = await fetch('/api/test-key', {
@@ -481,7 +481,7 @@ function renderHtml(config) {
         }
       } catch (e) {
         statusEl.className = 'status-box error';
-        statusEl.innerText = 'ظپط´ظ„ ط§ظ„ط§طھطµط§ظ„ ط¨ط§ظ„ط³ظٹط±ظپط± â‌Œ';
+        statusEl.innerText = 'فشل الاتصال بالسيرفر ❌';
       }
     }
 
@@ -519,9 +519,9 @@ function renderHtml(config) {
       const b64 = buildConfigString();
       const url = 'https://' + window.location.host + '/' + b64 + '/manifest.json';
       navigator.clipboard.writeText(url).then(() => {
-        alert('طھظ… ظ†ط³ط® ط±ط§ط¨ط· ط§ظ„ظ…ط§ظ†ظٹظپط³طھ ط¨ظ†ط¬ط§ط­! ط§ظ„طµظ‚ظ‡ ظپظٹ ط®ط§ظ†ط© ط§ظ„ط¥ط¶ط§ظپط§طھ.');
+        alert('تم نسخ رابط المانيفست بنجاح! الصقه في خانة الإضافات.');
       }).catch(() => {
-        prompt('ط§ظ†ط³ط® ط§ظ„ط±ط§ط¨ط· ظٹط¯ظˆظٹط§ظ‹:', url);
+        prompt('انسخ الرابط يدوياً:', url);
       });
     }
   </script>
@@ -692,10 +692,10 @@ app.get([
       return true;
     });
 
-    // --- ط¥ط¶ط§ظپط© ظ†ط¸ط§ظ… ط§ظ„طھط±ط¬ظ…ط© ط¨ط§ظ„ط°ظƒط§ط، ط§ظ„ط§طµط·ظ†ط§ط¹ظٹ (Trans-SRT ظˆ Trans-ASS) ---
+    // --- إضافة نظام الترجمة بالذكاء الاصطناعي (Trans-SRT و Trans-ASS) ---
     const transSubs = [];
     
-    // ط§ظ„ط¨ط­ط« ط¹ظ† ط£ظپط¶ظ„ ظ…ظ„ظپ طھط±ط¬ظ…ط© ظ…طھظˆظپط± (ظٹظپط¶ظ„ ط§ظ„ط¥ظ†ط¬ظ„ظٹط²ظٹ ط¥ط°ط§ ظˆط¬ط¯طŒ ظˆط¥ظ„ط§ ط£ظٹ ظ…ظ„ظپ ط¢ط®ط±)
+    // البحث عن أفضل ملف ترجمة متوفر (يفضل الإنجليزي إذا وجد، وإلا أي ملف آخر)
     let bestSourceForTranslation = uniqueSubs.find(s => (s.lang === 'eng' || s.lang === 'en') && s.url);
     if (!bestSourceForTranslation) {
         bestSourceForTranslation = uniqueSubs.find(s => s.url); 
@@ -704,7 +704,7 @@ app.get([
     if (bestSourceForTranslation) {
       const sourceUrl = encodeURIComponent(bestSourceForTranslation._originalUrl || bestSourceForTranslation.url);
       
-      // ط¨ظ†ط§ط، ط§ظ„ط±ظˆط§ط¨ط· ط§ظ„ط£ط±ط¨ط¹ط© ظˆط¥ط¹ط·ط§ط¤ظ‡ط§ ط£ظˆظ„ظˆظٹط© 10 ظ„طھط¸ظ‡ط± ظپظٹ ط§ظ„ظ†ظ‡ط§ظٹط©
+      // بناء الروابط الأربعة وإعطاؤها أولوية 10 لتظهر في النهاية
       transSubs.push({
         id: `trans-srt-1`,
         url: `${baseUrl}/stream-ai.srt?url=${sourceUrl}`,
@@ -737,7 +737,7 @@ app.get([
     }
     // -----------------------------------------------------------
 
-    // ط¯ظ…ط¬ ط§ظ„ظ†طھط§ط¦ط¬ ط§ظ„ط¹ط§ط¯ظٹط© ط£ظˆظ„ط§ظ‹طŒ ط«ظ… ط±ظˆط§ط¨ط· ط§ظ„ط°ظƒط§ط، ط§ظ„ط§طµط·ظ†ط§ط¹ظٹ ظپظٹ ط§ظ„ظ†ظ‡ط§ظٹط©
+    // دمج النتائج العادية أولاً، ثم روابط الذكاء الاصطناعي في النهاية
     const finalSubs = [...uniqueSubs, ...transSubs];
 
     res.json({ subtitles: finalSubs });
