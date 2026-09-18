@@ -4,255 +4,1000 @@ const axios = require('axios');
 const AdmZip = require('adm-zip');
 const iconv = require('iconv-lite');
 const zlib = require('zlib');
+
 const { resolveMedia } = require('./idMapper');
 const { getOpenSubtitles } = require('./opensubtitles');
 const { getSubDL } = require('./subdl');
 const { getSubSource, fetchSubSourceBuffer } = require('./subsource');
 const { getAnimeSubtitles } = require('./anime');
+
+// ط§ط³طھط¯ط¹ط§ط، ط¯ظˆط§ظ„ ط§ظ„ط°ظƒط§ط، ط§ظ„ط§طµط·ظ†ط§ط¹ظٹ ط§ظ„ط¬ط¯ظٹط¯ط©
 const { handleTranslationSrt, handleTranslationAss } = require('./ai');
 
 let getWyzie = null;
-try { getWyzie = require('./wyzie').getWyzie || require('./wyzie').getSubtitles || require('./wyzie'); } catch (e) { getWyzie = null; }
+try {
+  const wyzieMod = require('./wyzie');
+  getWyzie = wyzieMod.getWyzie || wyzieMod.getSubtitles || wyzieMod;
+} catch (e) {
+  getWyzie = null;
+}
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
 const PORT = process.env.PORT || 7000;
+
 const MANIFEST = {
-  id: 'org.nuvio.aggregated.subtitles', version: '25.0.0', name: 'Nuvio Multi-Source Subtitles',
+  id: 'org.nuvio.aggregated.subtitles',
+  version: '25.0.0',
+  name: 'Nuvio Multi-Source Subtitles',
   description: 'Arabic & Multi-language subtitles from OpenSubtitles, SubDL, SubSource, Wyzie & Anime',
-  resources: ['subtitles'], types: ['movie', 'series', 'anime'], idPrefixes: ['tt', 'kitsu'], catalogs: [],
-  behaviorHints: { configurable: true, configurationRequired: false }
-};
-
-const ASS_DEFAULT_HEADER = `[Script Info]\nScriptType: v4.00+\nCollisions: Normal\nPlayDepth: 0\nWrapStyle: 0\nScaledBorderAndShadow: yes\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Default,Arial,26,&H00FFFFFF,&H000000FF,&H00000000,&H96000000,-1,0,0,0,100,100,0,0,1,2,2,2,10,10,20,1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n`;
-
-// ذاكرة الترجمة الخلفية
-const translationStatusCache = new Map();
-
-function handleAiResponse(req, res, fixedBuffer, isAss) {
-  const doTranslate = req.query.translate === 'true';
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Headers', '*');
-  res.setHeader('Content-Type', isAss ? 'text/x-ssa; charset=utf-8' : 'application/x-subrip; charset=utf-8');
-  res.setHeader('Content-Disposition', `inline; filename="subtitle.${isAss ? 'ssa' : 'srt'}"`);
-
-  if (!doTranslate) return res.send(fixedBuffer);
-
-  const cacheKey = req.originalUrl;
-  if (translationStatusCache.has(cacheKey)) {
-    const state = translationStatusCache.get(cacheKey);
-    if (state.status === 'done') return res.send(state.text);
-    if (state.status === 'processing') return res.send(isAss ? ASS_DEFAULT_HEADER + "Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[النظام] الترجمة قيد التجهيز.. أعد التشغيل بعد قليل.\n" : "1\n00:00:01,000 --> 00:00:08,000\n[النظام] الترجمة قيد التجهيز.. أعد التشغيل بعد قليل.\n");
-    if (state.status === 'error') return res.send(isAss ? ASS_DEFAULT_HEADER + "Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[النظام] حدث خطأ أثناء الترجمة.\n" : "1\n00:00:01,000 --> 00:00:08,000\n[النظام] حدث خطأ أثناء الترجمة.\n");
+  resources: ['subtitles'],
+  types: ['movie', 'series', 'anime'],
+  idPrefixes: ['tt', 'kitsu'],
+  catalogs: [],
+  behaviorHints: {
+    configurable: true,
+    configurationRequired: false
   }
-
-  translationStatusCache.set(cacheKey, { status: 'processing' });
-  const rawText = fixedBuffer.toString('utf-8');
-
-  (async () => {
-    try {
-        let translatedText = isAss ? ASS_DEFAULT_HEADER + await handleTranslationAss(rawText) : await handleTranslationSrt(rawText);
-        translationStatusCache.set(cacheKey, { status: 'done', text: translatedText });
-    } catch (err) {
-        translationStatusCache.set(cacheKey, { status: 'error' });
-    }
-  })();
-
-  return res.send(isAss ? ASS_DEFAULT_HEADER + "Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[النظام] تم بدء الترجمة.. يرجى العودة بعد دقيقة.\n" : "1\n00:00:01,000 --> 00:00:08,000\n[النظام] تم بدء الترجمة.. يرجى العودة بعد دقيقة.\n");
-}
+};
 
 function fixArabicEncoding(buffer) {
   if (!buffer || !Buffer.isBuffer(buffer)) return buffer;
   if (buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4b) return buffer;
-  if (buffer.length >= 2 && buffer[0] === 0xff && buffer[1] === 0xfe) { try { return Buffer.from(iconv.decode(buffer, 'utf16-le'), 'utf-8'); } catch(e) {} }
-  if (buffer.length >= 2 && buffer[0] === 0xfe && buffer[1] === 0xff) { try { return Buffer.from(iconv.decode(buffer, 'utf16-be'), 'utf-8'); } catch(e) {} }
+
+  if (buffer.length >= 2 && buffer[0] === 0xff && buffer[1] === 0xfe) {
+    try {
+      const decodedUtf16 = iconv.decode(buffer, 'utf16-le');
+      return Buffer.from(decodedUtf16, 'utf-8');
+    } catch(e) {}
+  }
+  if (buffer.length >= 2 && buffer[0] === 0xfe && buffer[1] === 0xff) {
+    try {
+      const decodedUtf16be = iconv.decode(buffer, 'utf16-be');
+      return Buffer.from(decodedUtf16be, 'utf-8');
+    } catch(e) {}
+  }
+
   const utf8Text = buffer.toString('utf-8');
-  if (/[\u0600-\u06FF]/.test(utf8Text)) return buffer;
-  try { const decodedWin = iconv.decode(buffer, 'windows-1256'); if (/[\u0600-\u06FF]/.test(decodedWin)) return Buffer.from(decodedWin, 'utf-8'); } catch (e) {}
-  try { const decodedIso = iconv.decode(buffer, 'iso-8859-6'); if (/[\u0600-\u06FF]/.test(decodedIso)) return Buffer.from(decodedIso, 'utf-8'); } catch (e) {}
+  if (/[\u0600-\u06FF]/.test(utf8Text)) {
+    return buffer;
+  }
+
+  try {
+    const decodedWin = iconv.decode(buffer, 'windows-1256');
+    if (/[\u0600-\u06FF]/.test(decodedWin)) {
+      return Buffer.from(decodedWin, 'utf-8');
+    }
+  } catch (e) {}
+
+  try {
+    const decodedIso = iconv.decode(buffer, 'iso-8859-6');
+    if (/[\u0600-\u06FF]/.test(decodedIso)) {
+      return Buffer.from(decodedIso, 'utf-8');
+    }
+  } catch (e) {}
+
   return buffer;
 }
 
 function parseConfig(req) {
-  let config = { geminiKey: process.env.GEMINI_API_KEY || '', groqKey: process.env.GROQ_API_KEY || '', deeplKey: process.env.DEEPL_API_KEY || '', openAIKey: process.env.OPENAI_API_KEY || '', jimakuKey: process.env.JIMAKU_API_KEY || '', subsourceKey: process.env.SUBSOURCE_API_KEY || '', openSubtitlesKey: process.env.OPENSUBTITLES_API_KEY || '', subdlKey: process.env.SUBDL_API_KEY || '', wyzieKey: process.env.WYZIE_API_KEY || '' };
+  let config = {
+    geminiKey: process.env.GEMINI_API_KEY || '',
+    groqKey: process.env.GROQ_API_KEY || '',
+    deeplKey: process.env.DEEPL_API_KEY || '',
+    openAIKey: process.env.OPENAI_API_KEY || '',
+    jimakuKey: process.env.JIMAKU_API_KEY || '',
+    subsourceKey: process.env.SUBSOURCE_API_KEY || '',
+    openSubtitlesKey: process.env.OPENSUBTITLES_API_KEY || '',
+    subdlKey: process.env.SUBDL_API_KEY || '',
+    wyzieKey: process.env.WYZIE_API_KEY || ''
+  };
+
   const rawConfig = req.params.config;
   if (rawConfig) {
-    try { const decodedUrl = decodeURIComponent(rawConfig); config = { ...config, ...JSON.parse(Buffer.from(decodedUrl, 'base64').toString('utf-8')) }; } catch (e) {
-      try { config = { ...config, ...JSON.parse(Buffer.from(rawConfig, 'base64').toString('utf-8')) }; } catch (e2) {}
+    try {
+      const decodedUrl = decodeURIComponent(rawConfig);
+      const decodedB64 = Buffer.from(decodedUrl, 'base64').toString('utf-8');
+      config = { ...config, ...JSON.parse(decodedB64) };
+    } catch (e) {
+      try {
+        const decoded = Buffer.from(rawConfig, 'base64').toString('utf-8');
+        config = { ...config, ...JSON.parse(decoded) };
+      } catch (e2) {}
     }
   }
+
   return config;
 }
 
 function getBaseUrl(req) {
   const host = req.headers['x-forwarded-host'] || req.headers.host;
-  return `${req.headers['x-forwarded-proto'] || 'https'}://${host}`;
+  const proto = req.headers['x-forwarded-proto'] || 'https';
+  return `${proto}://${host}`;
 }
 
 function findEpisodeInZip(zip, episode) {
   const entries = zip.getEntries();
   const epNum = parseInt(episode, 10);
   const validExts = ['.srt', '.ass', '.ssa', '.vtt'];
-  const subEntries = entries.filter(e => !e.isDirectory && validExts.some(ext => e.entryName.toLowerCase().endsWith(ext)));
+
+  const subEntries = entries.filter(e => {
+    const name = e.entryName.toLowerCase();
+    return !e.isDirectory && validExts.some(ext => name.endsWith(ext));
+  });
+
   if (!subEntries.length) return null;
-  const patterns = [ new RegExp(`(?:s0*\\d+[._ -]*)?(?:e|ep|episode)[._ -]*0*${epNum}(?:[^0-9]|$)`, 'i'), new RegExp(`[._ -]0*${epNum}[._ -]`, 'i'), new RegExp(`[\\[\\(]0*${epNum}[\\]\\)]`, 'i'), new RegExp(`\\b0*${epNum}\\b`, 'i') ];
+
+  const patterns = [
+    new RegExp(`(?:s0*\\d+[._ -]*)?(?:e|ep|episode)[._ -]*0*${epNum}(?:[^0-9]|$)`, 'i'),
+    new RegExp(`[._ -]0*${epNum}[._ -]`, 'i'),
+    new RegExp(`[\\[\\(]0*${epNum}[\\]\\)]`, 'i'),
+    new RegExp(`\\b0*${epNum}\\b`, 'i')
+  ];
+
   for (const pattern of patterns) {
     const matches = subEntries.filter(e => pattern.test(e.entryName));
-    if (matches.length > 0) return matches.find(e => e.entryName.toLowerCase().endsWith('.ass') || e.entryName.toLowerCase().endsWith('.ssa')) || matches[0];
+    if (matches.length > 0) {
+      const assMatch = matches.find(e => {
+        const n = e.entryName.toLowerCase();
+        return n.endsWith('.ass') || n.endsWith('.ssa');
+      });
+      return assMatch || matches[0];
+    }
   }
-  return subEntries.find(e => e.entryName.toLowerCase().endsWith('.ass') || e.entryName.toLowerCase().endsWith('.ssa')) || subEntries[0] || null;
+
+  const defaultAss = subEntries.find(e => {
+    const n = e.entryName.toLowerCase();
+    return n.endsWith('.ass') || n.endsWith('.ssa');
+  });
+  return defaultAss || subEntries[0] || null;
 }
 
 function detectFormat(s) {
-  const formatVal = (s.format || '').toLowerCase(); const subFormatVal = (s.subFormat || s.SubFormat || '').toLowerCase(); const extVal = (s.ext || s.extension || '').toLowerCase(); const rawName = (s.fileName || s.origName || s.name || '').toLowerCase(); const rawUrl = (s.url || '').toLowerCase();
-  if (formatVal === 'ssa' || subFormatVal === 'ssa' || extVal === 'ssa' || rawUrl.includes('.ssa') || rawUrl.includes('format=ssa') || rawName.endsWith('.ssa') || rawName.includes('.ssa') || rawName.includes('[ssa]') || formatVal === 'ass' || subFormatVal === 'ass' || extVal === 'ass' || rawUrl.includes('.ass') || rawUrl.includes('format=ass') || rawName.endsWith('.ass') || rawName.includes('.ass') || rawName.includes('[ass]')) return 'ssa';
-  if (formatVal === 'vtt' || subFormatVal === 'vtt' || extVal === 'vtt' || rawUrl.includes('.vtt') || rawUrl.includes('format=vtt') || rawName.endsWith('.vtt')) return 'vtt';
+  const formatVal = (s.format || '').toLowerCase();
+  const subFormatVal = (s.subFormat || s.SubFormat || '').toLowerCase();
+  const extVal = (s.ext || s.extension || '').toLowerCase();
+  const rawName = (s.fileName || s.origName || s.name || '').toLowerCase();
+  const rawUrl = (s.url || '').toLowerCase();
+
+  if (
+    formatVal === 'ssa' || subFormatVal === 'ssa' || extVal === 'ssa' ||
+    rawUrl.includes('.ssa') || rawUrl.includes('format=ssa') ||
+    rawName.endsWith('.ssa') || rawName.includes('.ssa') || rawName.includes('[ssa]') ||
+    formatVal === 'ass' || subFormatVal === 'ass' || extVal === 'ass' ||
+    rawUrl.includes('.ass') || rawUrl.includes('format=ass') ||
+    rawName.endsWith('.ass') || rawName.includes('.ass') || rawName.includes('[ass]')
+  ) {
+    return 'ssa';
+  }
+
+  if (
+    formatVal === 'vtt' || subFormatVal === 'vtt' || extVal === 'vtt' ||
+    rawUrl.includes('.vtt') || rawUrl.includes('format=vtt') || rawName.endsWith('.vtt')
+  ) {
+    return 'vtt';
+  }
+
   return 'srt';
 }
 
-app.post('/api/test-key', async (req, res) => { return res.json({ success: true, message: 'تم التخطي' }); });
+app.post('/api/test-key', async (req, res) => {
+  const { provider, key } = req.body;
+  if (!key || !key.trim()) {
+    return res.json({ success: false, message: 'ظٹط±ط¬ظ‰ ط¥ط¯ط®ط§ظ„ ط§ظ„ظ…ظپطھط§ط­ ط£ظˆظ„ط§ظ‹ âڑ ï¸ڈ', status: 'warn' });
+  }
+
+  const cleanKey = key.trim();
+
+  try {
+    if (provider === 'gemini') {
+      const r = await axios.get(`https://generativelanguage.googleapis.com/v1beta/models?key=${cleanKey}`, { timeout: 7000 });
+      if (r.status === 200) return res.json({ success: true, message: 'ظ…ظپطھط§ط­ Gemini طµط§ظ„ط­ 100% âœ…' });
+    } else if (provider === 'groq') {
+      const r = await axios.get('https://api.groq.com/openai/v1/models', {
+        headers: { 'Authorization': `Bearer ${cleanKey}` },
+        timeout: 7000
+      });
+      if (r.status === 200) return res.json({ success: true, message: 'ظ…ظپطھط§ط­ Groq طµط§ظ„ط­ 100% âœ…' });
+    } else if (provider === 'deepl') {
+      let valid = false;
+      try {
+        const r1 = await axios.get('https://api-free.deepl.com/v2/usage', {
+          headers: { 'Authorization': `DeepL-Auth-Key ${cleanKey}` },
+          timeout: 5000
+        });
+        if (r1.status === 200) valid = true;
+      } catch (e) {
+        const r2 = await axios.get('https://api.deepl.com/v2/usage', {
+          headers: { 'Authorization': `DeepL-Auth-Key ${cleanKey}` },
+          timeout: 5000
+        });
+        if (r2.status === 200) valid = true;
+      }
+      if (valid) return res.json({ success: true, message: 'ظ…ظپطھط§ط­ DeepL طµط§ظ„ط­ 100% âœ…' });
+    } else if (provider === 'openai') {
+      const r = await axios.get('https://api.openai.com/v1/models', {
+        headers: { 'Authorization': `Bearer ${cleanKey}` },
+        timeout: 7000
+      });
+      if (r.status === 200) return res.json({ success: true, message: 'ظ…ظپطھط§ط­ OpenAI طµط§ظ„ط­ 100% âœ…' });
+    } else if (provider === 'jimaku') {
+      const r = await axios.get('https://jimaku.cc/api/entries/search?query=naruto', {
+        headers: { 'Authorization': cleanKey },
+        timeout: 7000
+      });
+      if (r.status === 200) return res.json({ success: true, message: 'ظ…ظپطھط§ط­ Jimaku طµط§ظ„ط­ 100% âœ…' });
+    } else if (provider === 'subsource') {
+      const r = await axios.get('https://api.subsource.net/api/v1/movies/search?q=avatar&searchType=text', {
+        headers: { 'X-API-Key': cleanKey },
+        timeout: 7000
+      });
+      if (r.status === 200) return res.json({ success: true, message: 'ظ…ظپطھط§ط­ SubSource طµط§ظ„ط­ 100% âœ…' });
+    } else if (provider === 'opensubtitles') {
+      let valid = false;
+      try {
+        const r1 = await axios.get('https://api.opensubtitles.com/api/v1/infos/formats', {
+          headers: { 'Api-Key': cleanKey, 'User-Agent': 'NuvioSubtitles v1.0' },
+          timeout: 7000
+        });
+        if (r1.status === 200) valid = true;
+      } catch (e1) {}
+
+      if (!valid) {
+        try {
+          const r2 = await axios.get('https://api.opensubtitles.com/api/v1/subtitles?imdb_id=0133093', {
+            headers: { 'Api-Key': cleanKey, 'User-Agent': 'NuvioSubtitles v1.0' },
+            timeout: 7000
+          });
+          if (r2.status === 200) valid = true;
+        } catch (e2) {}
+      }
+
+      if (valid) return res.json({ success: true, message: 'ظ…ظپطھط§ط­ OpenSubtitles طµط§ظ„ط­ 100% âœ…' });
+    } else if (provider === 'subdl') {
+      let valid = false;
+      try {
+        const r1 = await axios.get(`https://api.subdl.com/api/v1/subtitles?api_key=${cleanKey}&imdb_id=tt0111161`, {
+          headers: { 'Authorization': `Bearer ${cleanKey}`, 'X-API-Key': cleanKey },
+          timeout: 7000
+        });
+        if (r1.status === 200 && (r1.data?.status === true || r1.data?.results)) valid = true;
+      } catch (e1) {}
+
+      if (!valid) {
+        try {
+          const r2 = await axios.get('https://api.subdl.com/api/v2/me', {
+            headers: { 'Authorization': `Bearer ${cleanKey}`, 'X-API-Key': cleanKey },
+            timeout: 7000
+          });
+          if (r2.status === 200 || r2.data?.status === true) valid = true;
+        } catch (e2) {}
+      }
+
+      if (valid) return res.json({ success: true, message: 'ظ…ظپطھط§ط­ SubDL طµط§ظ„ط­ 100% âœ…' });
+    } else if (provider === 'wyzie') {
+      if (cleanKey.length > 10) return res.json({ success: true, message: 'ظ…ظپطھط§ط­ Wyzie Subs طµط§ظ„ط­ 100% âœ…' });
+    }
+
+    return res.json({ success: false, message: 'ط§ظ„ظ…ظپطھط§ط­ ط؛ظٹط± طµط§ظ„ط­ ط£ظˆ ط§ظ†طھظ‡طھ طµظ„ط§ط­ظٹطھظ‡ â‌Œ', status: 'error' });
+  } catch (err) {
+    const errorDetail = err.response?.data?.error?.message || err.response?.data?.message || err.message || 'Service unavailable';
+    return res.json({ success: false, message: `ظپط´ظ„ ط§ظ„ظپط­طµ: ${errorDetail} â‌Œ`, status: 'error' });
+  }
+});
 
 function renderHtml(config) {
-  return `<!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>إعداداتافة مواقع ومفاتيح الترجمة</title><style>*{box-sizing:border-box;margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}body{background-color:#0b1120;color:#f1f5f9;display:flex;justify-content:center;padding:20px 10px 40px;}.container{width:100%;max-width:480px;display:flex;flex-direction:column;gap:14px;}.main-title{text-align:center;color:#38bdf8;font-size:1.35rem;font-weight:700;margin-bottom:4px;}.section-title{text-align:center;color:#94a3b8;font-size:0.95rem;font-weight:600;margin:12px 0 4px;}.card{background-color:#162032;border-radius:10px;padding:12px;display:flex;flex-direction:column;gap:8px;border:1px solid #1e293b;}.card-header{display:flex;justify-content:space-between;align-items:center;}.card-label{font-size:0.88rem;font-weight:600;color:#e2e8f0;}.btn-get{display:inline-flex;align-items:center;gap:4px;font-size:0.78rem;color:#38bdf8;text-decoration:none;border:1px solid #0284c7;padding:3px 8px;border-radius:6px;background:rgba(2,132,199,0.1);}.btn-get:hover{background:rgba(2,132,199,0.25);}.input-row{display:flex;gap:8px;}.btn-check{background:#334155;border:1px solid #475569;color:#f8fafc;font-size:0.82rem;font-weight:600;padding:0 14px;border-radius:6px;cursor:pointer;height:38px;min-width:60px;}.btn-check:hover{background:#475569;}.input-field{flex:1;height:38px;background:#0f172a;border:1px solid #334155;border-radius:6px;color:#fff;padding:0 10px;font-size:0.85rem;direction:ltr;text-align:left;}.input-field:focus{outline:none;border-color:#38bdf8;}.status-box{font-size:0.76rem;line-height:1.35;padding:6px 8px;border-radius:4px;display:none;text-align:right;direction:rtl;word-break:break-word;}.status-box.success{display:block;color:#4ade80;background:rgba(74,222,128,0.1);border:1px solid rgba(74,222,128,0.2);}.status-box.error{display:block;color:#f87171;background:rgba(248,113,113,0.1);border:1px solid rgba(248,113,113,0.2);}.status-box.warn{display:block;color:#facc15;background:rgba(250,204,21,0.1);border:1px solid rgba(250,204,21,0.2);}.actions{display:flex;flex-direction:column;gap:10px;margin-top:15px;}.btn-action{height:46px;border-radius:8px;font-size:0.95rem;font-weight:700;cursor:pointer;border:none;display:flex;align-items:center;justify-content:center;gap:8px;color:#fff;text-decoration:none;}.btn-install{background:#0284c7;}.btn-install:hover{background:#0369a1;}.btn-copy{background:#334155;border:1px solid #475569;}.btn-copy:hover{background:#475569;}</style></head><body><div class="container"><h1 class="main-title">إعدادات كافة مواقع ومفاتيح الترجمة</h1><h2 class="section-title">🤖 محركات الذكاء الاصطناعي (الترجمة الفورية)</h2><div class="card"><div class="card-header"><span class="card-label">مفتاح Google Gemini API:</span><a href="https://aistudio.google.com/app/apikey" target="_blank" class="btn-get">احصل على المفتاح 🔗</a></div><div class="input-row"><input type="text" id="geminiKey" class="input-field" placeholder="Google Gemini API Key" value="${config.geminiKey || ''}"><button class="btn-check" onclick="checkKey('gemini')">فحص</button></div><div id="status-gemini" class="status-box"></div></div><div class="card"><div class="card-header"><span class="card-label">مفتاح Groq API (فائق السرعة):</span><a href="https://console.groq.com/keys" target="_blank" class="btn-get">احصل على المفتاح 🔗</a></div><div class="input-row"><input type="text" id="groqKey" class="input-field" placeholder="Groq API Key" value="${config.groqKey || ''}"><button class="btn-check" onclick="checkKey('groq')">فحص</button></div><div id="status-groq" class="status-box"></div></div><div class="card"><div class="card-header"><span class="card-label">مفتاح DeepL API:</span><a href="https://www.deepl.com/your-account/keys" target="_blank" class="btn-get">احصل على المفتاح 🔗</a></div><div class="input-row"><input type="text" id="deeplKey" class="input-field" placeholder="DeepL API Key" value="${config.deeplKey || ''}"><button class="btn-check" onclick="checkKey('deepl')">فحص</button></div><div id="status-deepl" class="status-box"></div></div><div class="card"><div class="card-header"><span class="card-label">مفتاح OpenAI API:</span><a href="https://platform.openai.com/api-keys" target="_blank" class="btn-get">احصل على المفتاح 🔗</a></div><div class="input-row"><input type="text" id="openAIKey" class="input-field" placeholder="OpenAI API Key" value="${config.openAIKey || ''}"><button class="btn-check" onclick="checkKey('openai')">فحص</button></div><div id="status-openai" class="status-box"></div></div><h2 class="section-title">🎌 مواقع ومصادر ترجمات الأنمي التخصصية</h2><div class="card"><div class="card-header"><span class="card-label">مفتاح Jimaku.cc API (اختياري للأنمي):</span><a href="https://jimaku.cc/" target="_blank" class="btn-get">احصل على المفتاح 🔗</a></div><div class="input-row"><input type="text" id="jimakuKey" class="input-field" placeholder="Jimaku API Token" value="${config.jimakuKey || ''}"><button class="btn-check" onclick="checkKey('jimaku')">فحص</button></div><div id="status-jimaku" class="status-box"></div></div><h2 class="section-title">🌐 قواعد بيانات ومزودات الترجمة العامة</h2><div class="card"><div class="card-header"><span class="card-label">مفتاح SubSource API:</span><a href="https://subsource.net/" target="_blank" class="btn-get">احصل على المفتاح 🔗</a></div><div class="input-row"><input type="text" id="subsourceKey" class="input-field" placeholder="SubSource API Key" value="${config.subsourceKey || ''}"><button class="btn-check" onclick="checkKey('subsource')">فحص</button></div><div id="status-subsource" class="status-box"></div></div><div class="card"><div class="card-header"><span class="card-label">مفتاح OpenSubtitles.com API:</span><a href="https://www.opensubtitles.com/en/consumers" target="_blank" class="btn-get">احصل على المفتاح 🔗</a></div><div class="input-row"><input type="text" id="openSubtitlesKey" class="input-field" placeholder="OpenSubtitles API Key" value="${config.openSubtitlesKey || ''}"><button class="btn-check" onclick="checkKey('opensubtitles')">فحص</button></div><div id="status-opensubtitles" class="status-box"></div></div><div class="card"><div class="card-header"><span class="card-label">مفتاح SubDL API:</span><a href="https://subdl.com/panel/api" target="_blank" class="btn-get">احصل على المفتاح 🔗</a></div><div class="input-row"><input type="text" id="subdlKey" class="input-field" placeholder="SubDL API Key" value="${config.subdlKey || ''}"><button class="btn-check" onclick="checkKey('subdl')">فحص</button></div><div id="status-subdl" class="status-box"></div></div><div class="card"><div class="card-header"><span class="card-label">مفتاح Wyzie Subs API:</span><a href="https://store.wyzie.io/" target="_blank" class="btn-get">احصل على المفتاح 🔗</a></div><div class="input-row"><input type="text" id="wyzieKey" class="input-field" placeholder="Wyzie Subs API Key" value="${config.wyzieKey || ''}"><button class="btn-check" onclick="checkKey('wyzie')">فحص</button></div><div id="status-wyzie" class="status-box"></div></div><div class="actions"><button class="btn-action btn-install" onclick="installAddon()">تثبيت الإضافة في Nuvio و Stremio 🚀</button><button id="copyBtn" class="btn-action btn-copy" style="display: none;" onclick="copyManifestUrl()">نسخ رابط المانيفست (Manifest URL) 📋</button></div></div><script>async function checkKey(p){const i=document.getElementById(p==='gemini'?'geminiKey':p==='groq'?'groqKey':p==='deepl'?'deeplKey':p==='openai'?'openAIKey':p==='jimaku'?'jimakuKey':p==='subsource'?'subsourceKey':p==='opensubtitles'?'openSubtitlesKey':p==='subdl'?'subdlKey':'wyzieKey');const s=document.getElementById('status-'+p);s.className='status-box';s.style.display='block';s.innerText='جارٍ الفحص...';try{const r=await fetch('/api/test-key',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:p,key:i.value.trim()})});const d=await r.json();s.innerText=d.message;s.className=d.success?'status-box success':d.status==='warn'?'status-box warn':'status-box error';}catch(e){s.className='status-box error';s.innerText='فشل الاتصال بالسيرفر ❌';}}function buildConfigString(){const p={geminiKey:document.getElementById('geminiKey').value.trim(),groqKey:document.getElementById('groqKey').value.trim(),deeplKey:document.getElementById('deeplKey').value.trim(),openAIKey:document.getElementById('openAIKey').value.trim(),jimakuKey:document.getElementById('jimakuKey').value.trim(),subsourceKey:document.getElementById('subsourceKey').value.trim(),openSubtitlesKey:document.getElementById('openSubtitlesKey').value.trim(),subdlKey:document.getElementById('subdlKey').value.trim(),wyzieKey:document.getElementById('wyzieKey').value.trim()};return encodeURIComponent(btoa(unescape(encodeURIComponent(JSON.stringify(p)))));}function installAddon(){const b=buildConfigString();const c=document.getElementById('copyBtn');if(c)c.style.display='flex';window.location.href='stremio://'+window.location.host+'/'+b+'/manifest.json';}function copyManifestUrl(){const u='https://'+window.location.host+'/'+buildConfigString()+'/manifest.json';navigator.clipboard.writeText(u).then(()=>alert('تم نسخ الرابط!')).catch(()=>prompt('انسخ:',u));}</script></body></html>`;
+  return `<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ط¥ط¹ط¯ط§ط¯ط§طھ ظƒط§ظپط© ظ…ظˆط§ظ‚ط¹ ظˆظ…ظپط§طھظٹط­ ط§ظ„طھط±ط¬ظ…ط©</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+    body { background-color: #0b1120; color: #f1f5f9; display: flex; justify-content: center; padding: 20px 10px 40px; }
+    .container { width: 100%; max-width: 480px; display: flex; flex-direction: column; gap: 14px; }
+    .main-title { text-align: center; color: #38bdf8; font-size: 1.35rem; font-weight: 700; margin-bottom: 4px; }
+    .section-title { text-align: center; color: #94a3b8; font-size: 0.95rem; font-weight: 600; margin: 12px 0 4px; }
+    .card { background-color: #162032; border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 8px; border: 1px solid #1e293b; }
+    .card-header { display: flex; justify-content: space-between; align-items: center; }
+    .card-label { font-size: 0.88rem; font-weight: 600; color: #e2e8f0; }
+    .btn-get { display: inline-flex; align-items: center; gap: 4px; font-size: 0.78rem; color: #38bdf8; text-decoration: none; border: 1px solid #0284c7; padding: 3px 8px; border-radius: 6px; background: rgba(2, 132, 199, 0.1); }
+    .btn-get:hover { background: rgba(2, 132, 199, 0.25); }
+    .input-row { display: flex; gap: 8px; }
+    .btn-check { background: #334155; border: 1px solid #475569; color: #f8fafc; font-size: 0.82rem; font-weight: 600; padding: 0 14px; border-radius: 6px; cursor: pointer; height: 38px; min-width: 60px; }
+    .btn-check:hover { background: #475569; }
+    .input-field { flex: 1; height: 38px; background: #0f172a; border: 1px solid #334155; border-radius: 6px; color: #fff; padding: 0 10px; font-size: 0.85rem; direction: ltr; text-align: left; }
+    .input-field:focus { outline: none; border-color: #38bdf8; }
+    .status-box { font-size: 0.76rem; line-height: 1.35; padding: 6px 8px; border-radius: 4px; display: none; text-align: right; direction: rtl; word-break: break-word; }
+    .status-box.success { display: block; color: #4ade80; background: rgba(74, 222, 128, 0.1); border: 1px solid rgba(74, 222, 128, 0.2); }
+    .status-box.error { display: block; color: #f87171; background: rgba(248, 113, 113, 0.1); border: 1px solid rgba(248, 113, 113, 0.2); }
+    .status-box.warn { display: block; color: #facc15; background: rgba(250, 204, 21, 0.1); border: 1px solid rgba(250, 204, 21, 0.2); }
+    .actions { display: flex; flex-direction: column; gap: 10px; margin-top: 15px; }
+    .btn-action { height: 46px; border-radius: 8px; font-size: 0.95rem; font-weight: 700; cursor: pointer; border: none; display: flex; align-items: center; justify-content: center; gap: 8px; color: #fff; text-decoration: none; }
+    .btn-install { background: #0284c7; }
+    .btn-install:hover { background: #0369a1; }
+    .btn-copy { background: #334155; border: 1px solid #475569; }
+    .btn-copy:hover { background: #475569; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1 class="main-title">ط¥ط¹ط¯ط§ط¯ط§طھ ظƒط§ظپط© ظ…ظˆط§ظ‚ط¹ ظˆظ…ظپط§طھظٹط­ ط§ظ„طھط±ط¬ظ…ط©</h1>
+
+    <h2 class="section-title">ًں¤– ظ…ط­ط±ظƒط§طھ ط§ظ„ط°ظƒط§ط، ط§ظ„ط§طµط·ظ†ط§ط¹ظٹ (ط§ظ„طھط±ط¬ظ…ط© ط§ظ„ظپظˆط±ظٹط©)</h2>
+
+    <div class="card">
+      <div class="card-header">
+        <span class="card-label">ظ…ظپطھط§ط­ Google Gemini API:</span>
+        <a href="https://aistudio.google.com/app/apikey" target="_blank" class="btn-get">ط§ط­طµظ„ ط¹ظ„ظ‰ ط§ظ„ظ…ظپطھط§ط­ ًں”—</a>
+      </div>
+      <div class="input-row">
+        <input type="text" id="geminiKey" class="input-field" placeholder="Google Gemini API Key" value="${config.geminiKey || ''}">
+        <button class="btn-check" onclick="checkKey('gemini')">ظپط­طµ</button>
+      </div>
+      <div id="status-gemini" class="status-box"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <span class="card-label">ظ…ظپطھط§ط­ Groq API (ظپط§ط¦ظ‚ ط§ظ„ط³ط±ط¹ط©):</span>
+        <a href="https://console.groq.com/keys" target="_blank" class="btn-get">ط§ط­طµظ„ ط¹ظ„ظ‰ ط§ظ„ظ…ظپطھط§ط­ ًں”—</a>
+      </div>
+      <div class="input-row">
+        <input type="text" id="groqKey" class="input-field" placeholder="Groq API Key" value="${config.groqKey || ''}">
+        <button class="btn-check" onclick="checkKey('groq')">ظپط­طµ</button>
+      </div>
+      <div id="status-groq" class="status-box"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <span class="card-label">ظ…ظپطھط§ط­ DeepL API:</span>
+        <a href="https://www.deepl.com/your-account/keys" target="_blank" class="btn-get">ط§ط­طµظ„ ط¹ظ„ظ‰ ط§ظ„ظ…ظپطھط§ط­ ًں”—</a>
+      </div>
+      <div class="input-row">
+        <input type="text" id="deeplKey" class="input-field" placeholder="DeepL API Key" value="${config.deeplKey || ''}">
+        <button class="btn-check" onclick="checkKey('deepl')">ظپط­طµ</button>
+      </div>
+      <div id="status-deepl" class="status-box"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <span class="card-label">ظ…ظپطھط§ط­ OpenAI API:</span>
+        <a href="https://platform.openai.com/api-keys" target="_blank" class="btn-get">ط§ط­طµظ„ ط¹ظ„ظ‰ ط§ظ„ظ…ظپطھط§ط­ ًں”—</a>
+      </div>
+      <div class="input-row">
+        <input type="text" id="openAIKey" class="input-field" placeholder="OpenAI API Key" value="${config.openAIKey || ''}">
+        <button class="btn-check" onclick="checkKey('openai')">ظپط­طµ</button>
+      </div>
+      <div id="status-openai" class="status-box"></div>
+    </div>
+
+    <h2 class="section-title">ًںژŒ ظ…ظˆط§ظ‚ط¹ ظˆظ…طµط§ط¯ط± طھط±ط¬ظ…ط§طھ ط§ظ„ط£ظ†ظ…ظٹ ط§ظ„طھط®طµطµظٹط©</h2>
+
+    <div class="card">
+      <div class="card-header">
+        <span class="card-label">ظ…ظپطھط§ط­ Jimaku.cc API (ط§ط®طھظٹط§ط±ظٹ ظ„ظ„ط£ظ†ظ…ظٹ):</span>
+        <a href="https://jimaku.cc/" target="_blank" class="btn-get">ط§ط­طµظ„ ط¹ظ„ظ‰ ط§ظ„ظ…ظپطھط§ط­ ًں”—</a>
+      </div>
+      <div class="input-row">
+        <input type="text" id="jimakuKey" class="input-field" placeholder="Jimaku API Token" value="${config.jimakuKey || ''}">
+        <button class="btn-check" onclick="checkKey('jimaku')">ظپط­طµ</button>
+      </div>
+      <div id="status-jimaku" class="status-box"></div>
+    </div>
+
+    <h2 class="section-title">ًںŒگ ظ‚ظˆط§ط¹ط¯ ط¨ظٹط§ظ†ط§طھ ظˆظ…ط²ظˆط¯ط§طھ ط§ظ„طھط±ط¬ظ…ط© ط§ظ„ط¹ط§ظ…ط©</h2>
+
+    <div class="card">
+      <div class="card-header">
+        <span class="card-label">ظ…ظپطھط§ط­ SubSource API:</span>
+        <a href="https://subsource.net/" target="_blank" class="btn-get">ط§ط­طµظ„ ط¹ظ„ظ‰ ط§ظ„ظ…ظپطھط§ط­ ًں”—</a>
+      </div>
+      <div class="input-row">
+        <input type="text" id="subsourceKey" class="input-field" placeholder="SubSource API Key" value="${config.subsourceKey || ''}">
+        <button class="btn-check" onclick="checkKey('subsource')">ظپط­طµ</button>
+      </div>
+      <div id="status-subsource" class="status-box"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <span class="card-label">ظ…ظپطھط§ط­ OpenSubtitles.com API:</span>
+        <a href="https://www.opensubtitles.com/en/consumers" target="_blank" class="btn-get">ط§ط­طµظ„ ط¹ظ„ظ‰ ط§ظ„ظ…ظپطھط§ط­ ًں”—</a>
+      </div>
+      <div class="input-row">
+        <input type="text" id="openSubtitlesKey" class="input-field" placeholder="OpenSubtitles API Key" value="${config.openSubtitlesKey || ''}">
+        <button class="btn-check" onclick="checkKey('opensubtitles')">ظپط­طµ</button>
+      </div>
+      <div id="status-opensubtitles" class="status-box"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <span class="card-label">ظ…ظپطھط§ط­ SubDL API:</span>
+        <a href="https://subdl.com/panel/api" target="_blank" class="btn-get">ط§ط­طµظ„ ط¹ظ„ظ‰ ط§ظ„ظ…ظپطھط§ط­ ًں”—</a>
+      </div>
+      <div class="input-row">
+        <input type="text" id="subdlKey" class="input-field" placeholder="SubDL API Key" value="${config.subdlKey || ''}">
+        <button class="btn-check" onclick="checkKey('subdl')">ظپط­طµ</button>
+      </div>
+      <div id="status-subdl" class="status-box"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <span class="card-label">ظ…ظپطھط§ط­ Wyzie Subs API:</span>
+        <a href="https://store.wyzie.io/" target="_blank" class="btn-get">ط§ط­طµظ„ ط¹ظ„ظ‰ ط§ظ„ظ…ظپطھط§ط­ ًں”—</a>
+      </div>
+      <div class="input-row">
+        <input type="text" id="wyzieKey" class="input-field" placeholder="Wyzie Subs API Key" value="${config.wyzieKey || ''}">
+        <button class="btn-check" onclick="checkKey('wyzie')">ظپط­طµ</button>
+      </div>
+      <div id="status-wyzie" class="status-box"></div>
+    </div>
+
+    <div class="actions">
+      <button class="btn-action btn-install" onclick="installAddon()">طھط«ط¨ظٹطھ ط§ظ„ط¥ط¶ط§ظپط© ظپظٹ Nuvio ظˆ Stremio ًںڑ€</button>
+      <button id="copyBtn" class="btn-action btn-copy" style="display: none;" onclick="copyManifestUrl()">ظ†ط³ط® ط±ط§ط¨ط· ط§ظ„ظ…ط§ظ†ظٹظپط³طھ (Manifest URL) ًں“‹</button>
+    </div>
+  </div>
+
+  <script>
+    async function checkKey(provider) {
+      const input = document.getElementById(provider === 'gemini' ? 'geminiKey' :
+                                           provider === 'groq' ? 'groqKey' :
+                                           provider === 'deepl' ? 'deeplKey' :
+                                           provider === 'openai' ? 'openAIKey' :
+                                           provider === 'jimaku' ? 'jimakuKey' :
+                                           provider === 'subsource' ? 'subsourceKey' :
+                                           provider === 'opensubtitles' ? 'openSubtitlesKey' :
+                                           provider === 'subdl' ? 'subdlKey' : 'wyzieKey');
+      const statusEl = document.getElementById('status-' + provider);
+      const val = input.value.trim();
+
+      statusEl.className = 'status-box';
+      statusEl.style.display = 'block';
+      statusEl.innerText = 'ط¬ط§ط±ظچ ط§ظ„ظپط­طµ...';
+
+      try {
+        const res = await fetch('/api/test-key', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ provider, key: val })
+        });
+        const data = await res.json();
+        statusEl.innerText = data.message;
+        if (data.success) {
+          statusEl.className = 'status-box success';
+        } else if (data.status === 'warn') {
+          statusEl.className = 'status-box warn';
+        } else {
+          statusEl.className = 'status-box error';
+        }
+      } catch (e) {
+        statusEl.className = 'status-box error';
+        statusEl.innerText = 'ظپط´ظ„ ط§ظ„ط§طھطµط§ظ„ ط¨ط§ظ„ط³ظٹط±ظپط± â‌Œ';
+      }
+    }
+
+    function buildConfigString() {
+      const payload = {
+        geminiKey: document.getElementById('geminiKey').value.trim(),
+        groqKey: document.getElementById('groqKey').value.trim(),
+        deeplKey: document.getElementById('deeplKey').value.trim(),
+        openAIKey: document.getElementById('openAIKey').value.trim(),
+        jimakuKey: document.getElementById('jimakuKey').value.trim(),
+        subsourceKey: document.getElementById('subsourceKey').value.trim(),
+        openSubtitlesKey: document.getElementById('openSubtitlesKey').value.trim(),
+        subdlKey: document.getElementById('subdlKey').value.trim(),
+        wyzieKey: document.getElementById('wyzieKey').value.trim()
+      };
+      
+      const jsonStr = JSON.stringify(payload);
+      const b64 = btoa(unescape(encodeURIComponent(jsonStr)));
+      return encodeURIComponent(b64);
+    }
+
+    function installAddon() {
+      const b64 = buildConfigString();
+      const host = window.location.host;
+
+      const copyBtn = document.getElementById('copyBtn');
+      if (copyBtn) {
+        copyBtn.style.display = 'flex';
+      }
+
+      window.location.href = 'stremio://' + host + '/' + b64 + '/manifest.json';
+    }
+
+    function copyManifestUrl() {
+      const b64 = buildConfigString();
+      const url = 'https://' + window.location.host + '/' + b64 + '/manifest.json';
+      navigator.clipboard.writeText(url).then(() => {
+        alert('طھظ… ظ†ط³ط® ط±ط§ط¨ط· ط§ظ„ظ…ط§ظ†ظٹظپط³طھ ط¨ظ†ط¬ط§ط­! ط§ظ„طµظ‚ظ‡ ظپظٹ ط®ط§ظ†ط© ط§ظ„ط¥ط¶ط§ظپط§طھ.');
+      }).catch(() => {
+        prompt('ط§ظ†ط³ط® ط§ظ„ط±ط§ط¨ط· ظٹط¯ظˆظٹط§ظ‹:', url);
+      });
+    }
+  </script>
+</body>
+</html>`;
 }
 
-app.get(['/', '/configure', '/:config/configure'], (req, res) => { res.setHeader('Content-Type', 'text/html; charset=utf-8'); res.send(renderHtml(parseConfig(req))); });
-app.get(['/manifest.json', '/:config/manifest.json'], (req, res) => { res.setHeader('Access-Control-Allow-Origin', '*'); res.setHeader('Access-Control-Allow-Headers', '*'); res.setHeader('Content-Type', 'application/json'); res.json({ ...MANIFEST, behaviorHints: { configurable: true, configurationRequired: !req.params.config } }); });
+app.get(['/', '/configure', '/:config/configure'], (req, res) => {
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  const config = parseConfig(req);
+  res.send(renderHtml(config));
+});
 
-app.get(['/subtitles/:type/:id', '/subtitles/:type/:id/:extra', '/:config/subtitles/:type/:id', '/:config/subtitles/:type/:id/:extra'], async (req, res) => {
-  res.setHeader('Access-Control-Allow-Origin', '*'); res.setHeader('Access-Control-Allow-Headers', '*'); res.setHeader('Content-Type', 'application/json');
-  let targetId = req.params.id || ''; if (targetId.endsWith('.json')) targetId = targetId.slice(0, -5);
-  const type = req.params.type; const config = parseConfig(req); const baseUrl = getBaseUrl(req);
+app.get(['/manifest.json', '/:config/manifest.json'], (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Headers', '*');
+  res.setHeader('Content-Type', 'application/json');
+
+  const config = req.params.config;
+  const manifest = {
+    ...MANIFEST,
+    behaviorHints: {
+      configurable: true,
+      configurationRequired: !config
+    }
+  };
+  res.json(manifest);
+});
+
+app.get([
+  '/subtitles/:type/:id', 
+  '/subtitles/:type/:id/:extra',
+  '/:config/subtitles/:type/:id',
+  '/:config/subtitles/:type/:id/:extra'
+], async (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Headers', '*');
+  res.setHeader('Content-Type', 'application/json');
+
+  let targetId = req.params.id || '';
+  if (targetId.endsWith('.json')) {
+    targetId = targetId.slice(0, -5);
+  }
+
+  const type = req.params.type;
+  const config = parseConfig(req);
+  const baseUrl = getBaseUrl(req);
 
   try {
     const media = await resolveMedia(targetId, type);
-    const imdbId = media.imdbId; const season = media.season; const episode = media.episode; const title = media.title || imdbId; const mediaType = media.type || type;
-    const tasks = [getAnimeSubtitles(targetId, episode, config.jimakuKey, title).catch(() => [])];
+    const imdbId = media.imdbId;
+    const season = media.season;
+    const episode = media.episode;
+    const title = media.title || imdbId;
+    const mediaType = media.type || type;
+
+    const tasks = [
+      getAnimeSubtitles(targetId, episode, config.jimakuKey, title).catch(() => [])
+    ];
 
     if (imdbId) {
-      tasks.push(getOpenSubtitles({ imdbId, season, episode, type: mediaType, apiKey: config.openSubtitlesKey }).catch(() => []));
-      tasks.push(getSubDL({ imdbId, season, episode, type: mediaType, apiKey: config.subdlKey }).catch(() => []));
+      tasks.push(getOpenSubtitles({
+        imdbId,
+        season,
+        episode,
+        type: mediaType,
+        apiKey: config.openSubtitlesKey
+      }).catch(() => []));
+
+      tasks.push(getSubDL({
+        imdbId,
+        season,
+        episode,
+        type: mediaType,
+        apiKey: config.subdlKey
+      }).catch(() => []));
     }
-    if (config.subsourceKey && (title || imdbId)) tasks.push(getSubSource({ title, imdbId, season, episode, type: mediaType, apiKey: config.subsourceKey }).catch(() => []));
-    if (getWyzie && imdbId) tasks.push(getWyzie({ imdbId, season, episode, type: mediaType, apiKey: config.wyzieKey }).catch(() => []));
+
+    if (config.subsourceKey && (title || imdbId)) {
+      tasks.push(getSubSource({
+        title,
+        imdbId,
+        season,
+        episode,
+        type: mediaType,
+        apiKey: config.subsourceKey
+      }).catch(() => []));
+    }
+
+    if (getWyzie && imdbId) {
+      tasks.push(getWyzie({
+        imdbId,
+        season,
+        episode,
+        type: mediaType,
+        apiKey: config.wyzieKey
+      }).catch(() => []));
+    }
 
     const settled = await Promise.allSettled(tasks);
-    const allSubs = settled.filter(r => r.status === 'fulfilled').flatMap(r => r.value).filter(s => s && s.url);
+    const allSubs = settled
+      .filter(r => r.status === 'fulfilled')
+      .flatMap(r => r.value)
+      .filter(s => s && s.url);
+
     const sourceCounters = {};
 
     const formatted = allSubs.map((s) => {
-      let finalUrl = s.url; const ext = detectFormat(s); const isAssTrack = ext === 'ssa'; const rawSource = (s._source || '').toLowerCase(); let siteName = 'Subtitles';
-      if (rawSource.includes('opensubtitles')) siteName = 'OpenSubtitles'; else if (rawSource.includes('subdl')) siteName = 'SubDL'; else if (rawSource.includes('subsource')) siteName = 'SubSource'; else if (rawSource.includes('wyzie')) siteName = 'Wyzie'; else if (rawSource.includes('animetosho') || rawSource.includes('anime')) siteName = 'AnimeTosho'; else if (rawSource.includes('jimaku')) siteName = 'Jimaku';
-      const groupKey = `${siteName}-${ext}`; sourceCounters[groupKey] = (sourceCounters[groupKey] || 0) + 1; const count = sourceCounters[groupKey];
+      let finalUrl = s.url;
+      const ext = detectFormat(s);
+      const isAssTrack = ext === 'ssa';
+      const rawSource = (s._source || '').toLowerCase();
+      let siteName = 'Subtitles';
+
+      if (rawSource.includes('opensubtitles')) siteName = 'OpenSubtitles';
+      else if (rawSource.includes('subdl')) siteName = 'SubDL';
+      else if (rawSource.includes('subsource')) siteName = 'SubSource';
+      else if (rawSource.includes('wyzie')) siteName = 'Wyzie';
+      else if (rawSource.includes('animetosho') || rawSource.includes('anime')) siteName = 'AnimeTosho';
+      else if (rawSource.includes('jimaku')) siteName = 'Jimaku';
+
+      const groupKey = `${siteName}-${ext}`;
+      sourceCounters[groupKey] = (sourceCounters[groupKey] || 0) + 1;
+      const count = sourceCounters[groupKey];
+
       const isActuallyZip = s._isZip === true || s.url.toLowerCase().endsWith('.zip');
 
-      if (isActuallyZip) finalUrl = `${baseUrl}/stream-zip.${ext}?url=${encodeURIComponent(s.url)}&ep=${s._episode || episode || 1}`;
-      else if (s.url.startsWith('subsource://')) finalUrl = `${baseUrl}/stream-subsource.${ext}?data=${encodeURIComponent(s.url)}`;
-      else if (s.url.startsWith('os://')) finalUrl = `${baseUrl}/stream-os.${ext}?data=${encodeURIComponent(s.url)}&key=${encodeURIComponent(config.openSubtitlesKey || '')}`;
-      else if (isAssTrack && !finalUrl.toLowerCase().endsWith('.ssa') && !finalUrl.toLowerCase().endsWith('.ass')) finalUrl = `${baseUrl}/stream-proxy.ssa?url=${encodeURIComponent(finalUrl)}`;
-      else if (rawSource.includes('opensubtitles') || finalUrl.includes('opensubtitles') || finalUrl.includes('strem.io')) finalUrl = `${baseUrl}/stream-proxy.srt?url=${encodeURIComponent(finalUrl)}`;
+      if (isActuallyZip) {
+        finalUrl = `${baseUrl}/stream-zip.${ext}?url=${encodeURIComponent(s.url)}&ep=${s._episode || episode || 1}`;
+      } else if (s.url.startsWith('subsource://')) {
+        finalUrl = `${baseUrl}/stream-subsource.${ext}?data=${encodeURIComponent(s.url)}`;
+      } else if (s.url.startsWith('os://')) {
+        finalUrl = `${baseUrl}/stream-os.${ext}?data=${encodeURIComponent(s.url)}&key=${encodeURIComponent(config.openSubtitlesKey || '')}`;
+      } else if (isAssTrack) {
+        if (!finalUrl.toLowerCase().endsWith('.ssa') && !finalUrl.toLowerCase().endsWith('.ass')) {
+          finalUrl = `${baseUrl}/stream-proxy.ssa?url=${encodeURIComponent(finalUrl)}`;
+        }
+      } else if (rawSource.includes('opensubtitles') || finalUrl.includes('opensubtitles') || finalUrl.includes('strem.io')) {
+        finalUrl = `${baseUrl}/stream-proxy.srt?url=${encodeURIComponent(finalUrl)}`;
+      }
 
-      return { id: `nuvio-${ext}-${rawSource.replace(/[^a-z0-9]/g, '') || siteName.toLowerCase()}-ara-${count}`, url: finalUrl, lang: s.lang || 'ara', format: ext, _priority: s._priority !== undefined ? s._priority : (isAssTrack ? 0 : 2) };
+      const sourceTag = rawSource.replace(/[^a-z0-9]/g, '') || siteName.toLowerCase();
+      const subId = `nuvio-${ext}-${sourceTag}-ara-${count}`;
+
+      return {
+        id: subId,
+        url: finalUrl,
+        lang: s.lang || 'ara',
+        format: ext,
+        _priority: s._priority !== undefined ? s._priority : (isAssTrack ? 0 : 2),
+        _originalUrl: finalUrl
+      };
     });
 
     formatted.sort((a, b) => {
       if (a._priority !== b._priority) return a._priority - b._priority;
-      const aIsAr = a.lang === 'ara' || a.lang === 'ar'; const bIsAr = b.lang === 'ara' || b.lang === 'ar';
-      if (aIsAr && !bIsAr) return -1; if (!aIsAr && bIsAr) return 1; return 0;
+      const aIsAr = a.lang === 'ara' || a.lang === 'ar';
+      const bIsAr = b.lang === 'ara' || b.lang === 'ar';
+      if (aIsAr && !bIsAr) return -1;
+      if (!aIsAr && bIsAr) return 1;
+      return 0;
     });
 
     const seenUrls = new Set();
-    const uniqueSubs = formatted.filter(s => { if (seenUrls.has(s.url)) return false; seenUrls.add(s.url); return true; });
+    const uniqueSubs = formatted.filter(s => {
+      if (seenUrls.has(s.url)) return false;
+      seenUrls.add(s.url);
+      return true;
+    });
 
-    // --- نظام الترجمة الذكي بالخلفية ---
+    // --- ط¥ط¶ط§ظپط© ظ†ط¸ط§ظ… ط§ظ„طھط±ط¬ظ…ط© ط¨ط§ظ„ط°ظƒط§ط، ط§ظ„ط§طµط·ظ†ط§ط¹ظٹ (Trans-SRT ظˆ Trans-ASS) ---
     const transSubs = [];
-    let bestSource = uniqueSubs.find(s => (s.lang === 'eng' || s.lang === 'en') && s.url) || uniqueSubs.find(s => s.url); 
-    if (bestSource) {
-      const aiUrl = `${bestSource.url}&translate=true`;
-      transSubs.push({ id: `trans-ai-1`, url: aiUrl, lang: 'ara', format: bestSource.format, _priority: 10 });
-      transSubs.push({ id: `trans-ai-2`, url: aiUrl, lang: 'ara', format: bestSource.format, _priority: 10 });
+    
+    // ط§ظ„ط¨ط­ط« ط¹ظ† ط£ظپط¶ظ„ ظ…ظ„ظپ طھط±ط¬ظ…ط© ظ…طھظˆظپط± (ظٹظپط¶ظ„ ط§ظ„ط¥ظ†ط¬ظ„ظٹط²ظٹ ط¥ط°ط§ ظˆط¬ط¯طŒ ظˆط¥ظ„ط§ ط£ظٹ ظ…ظ„ظپ ط¢ط®ط±)
+    let bestSourceForTranslation = uniqueSubs.find(s => (s.lang === 'eng' || s.lang === 'en') && s.url);
+    if (!bestSourceForTranslation) {
+        bestSourceForTranslation = uniqueSubs.find(s => s.url); 
     }
 
-    res.json({ subtitles: [...uniqueSubs, ...transSubs] });
-  } catch (err) { res.json({ subtitles: [] }); }
+    if (bestSourceForTranslation) {
+      const sourceUrl = encodeURIComponent(bestSourceForTranslation._originalUrl || bestSourceForTranslation.url);
+      
+      // ط¨ظ†ط§ط، ط§ظ„ط±ظˆط§ط¨ط· ط§ظ„ط£ط±ط¨ط¹ط© ظˆط¥ط¹ط·ط§ط¤ظ‡ط§ ط£ظˆظ„ظˆظٹط© 10 ظ„طھط¸ظ‡ط± ظپظٹ ط§ظ„ظ†ظ‡ط§ظٹط©
+      transSubs.push({
+        id: `trans-srt-1`,
+        url: `${baseUrl}/stream-ai.srt?url=${sourceUrl}`,
+        lang: 'ara',
+        format: 'srt',
+        _priority: 10
+      });
+      transSubs.push({
+        id: `trans-srt-2`,
+        url: `${baseUrl}/stream-ai.srt?url=${sourceUrl}`,
+        lang: 'ara',
+        format: 'srt',
+        _priority: 10
+      });
+
+      transSubs.push({
+        id: `trans-ass-1`,
+        url: `${baseUrl}/stream-ai.ass?url=${sourceUrl}`,
+        lang: 'ara',
+        format: 'ass',
+        _priority: 11
+      });
+      transSubs.push({
+        id: `trans-ass-2`,
+        url: `${baseUrl}/stream-ai.ass?url=${sourceUrl}`,
+        lang: 'ara',
+        format: 'ass',
+        _priority: 11
+      });
+    }
+    // -----------------------------------------------------------
+
+    // ط¯ظ…ط¬ ط§ظ„ظ†طھط§ط¦ط¬ ط§ظ„ط¹ط§ط¯ظٹط© ط£ظˆظ„ط§ظ‹طŒ ط«ظ… ط±ظˆط§ط¨ط· ط§ظ„ط°ظƒط§ط، ط§ظ„ط§طµط·ظ†ط§ط¹ظٹ ظپظٹ ط§ظ„ظ†ظ‡ط§ظٹط©
+    const finalSubs = [...uniqueSubs, ...transSubs];
+
+    res.json({ subtitles: finalSubs });
+  } catch (err) {
+    res.json({ subtitles: [] });
+  }
+});
+
+app.all(['/stream-ai.srt', '/stream-ai.ass', '/stream-ai.ssa'], async (req, res) => {
+  if (req.method === 'OPTIONS') return res.sendStatus(200);
+  
+  const targetUrl = req.query.url;
+  if (!targetUrl) return res.status(400).send('Missing URL for AI translation');
+
+  const config = parseConfig(req);
+  const isAss = req.path.endsWith('.ass') || req.path.endsWith('.ssa');
+
+  try {
+    let finalContent = '';
+
+    if (isAss) {
+      finalContent = await handleTranslationAss(targetUrl, config);
+      res.setHeader('Content-Type', 'text/x-ssa; charset=utf-8');
+      res.setHeader('Content-Disposition', 'inline; filename="Trans-ASS.ssa"');
+    } else {
+      finalContent = await handleTranslationSrt(targetUrl, config);
+      res.setHeader('Content-Type', 'application/x-subrip; charset=utf-8');
+      res.setHeader('Content-Disposition', 'inline; filename="Trans-SRT.srt"');
+    }
+
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Headers', '*');
+    res.send(finalContent);
+  } catch (e) {
+    console.error('AI Translation Error:', e.message);
+    res.status(500).send('Error generating AI translation');
+  }
 });
 
 app.all(['/stream-proxy', '/stream-proxy.srt', '/stream-proxy.ass', '/stream-proxy.ssa'], async (req, res) => {
   if (req.method === 'OPTIONS') return res.sendStatus(200);
-  const targetUrl = req.query.url; if (!targetUrl) return res.status(400).send('Missing URL');
+  const targetUrl = req.query.url;
+  if (!targetUrl) return res.status(400).send('Missing URL');
+
   try {
-    const response = await axios.get(targetUrl, { responseType: 'arraybuffer', timeout: 10000 });
+    const response = await axios.get(targetUrl, {
+      responseType: 'arraybuffer',
+      timeout: 10000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      }
+    });
+
     let buffer = Buffer.from(response.data);
-    if (buffer.length >= 2 && buffer[0] === 0x1f && buffer[1] === 0x8b) buffer = zlib.gunzipSync(buffer);
+
+    if (buffer.length >= 2 && buffer[0] === 0x1f && buffer[1] === 0x8b) {
+      buffer = zlib.gunzipSync(buffer);
+    }
+
     if (buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4b) {
-      const zip = new AdmZip(buffer); const entries = zip.getEntries();
+      const zip = new AdmZip(buffer);
+      const entries = zip.getEntries();
       const assEntry = entries.find(e => !e.isDirectory && (e.entryName.toLowerCase().endsWith('.ass') || e.entryName.toLowerCase().endsWith('.ssa')));
       const subEntry = entries.find(e => !e.isDirectory && e.entryName.toLowerCase().endsWith('.srt'));
-      if (assEntry) buffer = assEntry.getData(); else if (subEntry) buffer = subEntry.getData();
+      if (assEntry) buffer = assEntry.getData();
+      else if (subEntry) buffer = subEntry.getData();
     }
+
     const fixedBuffer = fixArabicEncoding(buffer);
-    const isAss = req.path.endsWith('.ass') || req.path.endsWith('.ssa') || fixedBuffer.slice(0, 500).toString('utf-8').includes('[Script Info]');
-    return handleAiResponse(req, res, fixedBuffer, isAss);
-  } catch (e) { res.status(500).send('Error proxying subtitle'); }
+    const contentCheck = fixedBuffer.slice(0, 500).toString('utf-8');
+    const isAss = contentCheck.includes('[Script Info]') || contentCheck.includes('V4+ Styles') || req.path.endsWith('.ass') || req.path.endsWith('.ssa');
+
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Headers', '*');
+
+    if (isAss) {
+      res.setHeader('Content-Type', 'text/x-ssa; charset=utf-8');
+      res.setHeader('Content-Disposition', 'inline; filename="subtitle.ssa"');
+    } else {
+      res.setHeader('Content-Type', 'application/x-subrip; charset=utf-8');
+      res.setHeader('Content-Disposition', 'inline; filename="subtitle.srt"');
+    }
+
+    res.send(fixedBuffer);
+  } catch (e) {
+    res.status(500).send('Error proxying subtitle');
+  }
 });
 
 app.all(['/stream-os', '/stream-os.srt', '/stream-os.ass', '/stream-os.ssa'], async (req, res) => {
   if (req.method === 'OPTIONS') return res.sendStatus(200);
-  const dataUrl = req.query.data || ''; const apiKey = req.query.key || '';
-  if (!dataUrl || !apiKey) return res.status(400).send('Missing data or apiKey');
+  const dataUrl = req.query.data || '';
+  const apiKey = req.query.key || '';
+
+  if (!dataUrl) return res.status(400).send('Missing data');
+
   try {
     const parsed = new URL(dataUrl.replace('os://', 'http://dummy.com/'));
     const fileId = parseInt(parsed.pathname.replace('/', ''), 10);
     const formatParam = (parsed.searchParams.get('format') || 'srt').toLowerCase();
-    const dlRes = await axios.post('https://api.opensubtitles.com/api/v1/download', { file_id: fileId }, { headers: { 'Api-Key': apiKey.trim(), 'User-Agent': 'NuvioSubtitles v1.0.0', 'Content-Type': 'application/json' }, timeout: 8000 });
-    const directLink = dlRes.data?.link; if (!directLink) return res.status(404).send('Download link not found');
-    const fileRes = await axios.get(directLink, { responseType: 'arraybuffer', timeout: 10000 });
+
+    if (!fileId || !apiKey) return res.status(400).send('Missing fileId or apiKey');
+
+    const dlRes = await axios.post(
+      'https://api.opensubtitles.com/api/v1/download',
+      { file_id: fileId },
+      {
+        headers: {
+          'Api-Key': apiKey.trim(),
+          'User-Agent': 'NuvioSubtitles v1.0.0',
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        timeout: 8000
+      }
+    );
+
+    const directLink = dlRes.data?.link;
+    if (!directLink) return res.status(404).send('Download link not found');
+
+    const fileRes = await axios.get(directLink, {
+      responseType: 'arraybuffer',
+      timeout: 10000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': '*/*'
+      }
+    });
+
     let buffer = Buffer.from(fileRes.data);
-    if (buffer.length >= 2 && buffer[0] === 0x1f && buffer[1] === 0x8b) buffer = zlib.gunzipSync(buffer);
-    if (buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4b) {
-      const zip = new AdmZip(buffer); const entries = zip.getEntries();
-      const assEntry = entries.find(e => !e.isDirectory && (e.entryName.toLowerCase().endsWith('.ass') || e.entryName.toLowerCase().endsWith('.ssa')));
-      const subEntry = entries.find(e => !e.isDirectory && (e.entryName.toLowerCase().endsWith('.srt') || e.entryName.toLowerCase().endsWith('.vtt')));
-      if (assEntry) buffer = assEntry.getData(); else if (subEntry) buffer = subEntry.getData();
+
+    if (buffer.length >= 2 && buffer[0] === 0x1f && buffer[1] === 0x8b) {
+      buffer = zlib.gunzipSync(buffer);
     }
+
+    if (buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4b) {
+      const zip = new AdmZip(buffer);
+      const entries = zip.getEntries();
+      const assEntry = entries.find(e => !e.isDirectory && (e.entryName.toLowerCase().endsWith('.ass') || e.entryName.toLowerCase().endsWith('.ssa')));
+      const anySubEntry = entries.find(e => !e.isDirectory && (e.entryName.toLowerCase().endsWith('.srt') || e.entryName.toLowerCase().endsWith('.vtt')));
+      
+      if (assEntry) {
+        buffer = assEntry.getData();
+      } else if (anySubEntry) {
+        buffer = anySubEntry.getData();
+      }
+    }
+
     const fixedBuffer = fixArabicEncoding(buffer);
-    const isAss = formatParam === 'ass' || formatParam === 'ssa' || fixedBuffer.slice(0, 500).toString('utf-8').includes('[Script Info]');
-    return handleAiResponse(req, res, fixedBuffer, isAss);
-  } catch (e) { res.status(500).send('Error streaming OpenSubtitles'); }
+    const contentCheck = fixedBuffer.slice(0, 500).toString('utf-8');
+    const isActuallyAss = formatParam === 'ass' || 
+                          formatParam === 'ssa' || 
+                          contentCheck.includes('[Script Info]') || 
+                          contentCheck.includes('V4+ Styles');
+
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Headers', '*');
+
+    if (isActuallyAss) {
+      res.setHeader('Content-Type', 'text/x-ssa; charset=utf-8');
+      res.setHeader('Content-Disposition', 'inline; filename="subtitle.ssa"');
+    } else {
+      res.setHeader('Content-Type', 'application/x-subrip; charset=utf-8');
+      res.setHeader('Content-Disposition', 'inline; filename="subtitle.srt"');
+    }
+
+    res.send(fixedBuffer);
+  } catch (e) {
+    res.status(500).send('Error streaming OpenSubtitles');
+  }
 });
 
 app.all(['/stream-zip', '/stream-zip.srt', '/stream-zip.ass', '/stream-zip.ssa'], async (req, res) => {
   if (req.method === 'OPTIONS') return res.sendStatus(200);
-  const zipUrl = req.query.url; const ep = req.query.ep || '1';
+  const zipUrl = req.query.url;
+  const ep = req.query.ep || '1';
+
   if (!zipUrl) return res.status(400).send('Missing URL');
+
   try {
-    const response = await axios.get(zipUrl, { responseType: 'arraybuffer', timeout: 10000 });
+    const response = await axios.get(zipUrl, {
+      responseType: 'arraybuffer',
+      timeout: 10000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      }
+    });
+
     const zip = new AdmZip(Buffer.from(response.data));
     const entry = findEpisodeInZip(zip, ep);
+
     if (!entry) return res.status(404).send('Episode not found in archive');
-    const fixedBuffer = fixArabicEncoding(entry.getData());
+
+    const rawContent = entry.getData();
+    const content = fixArabicEncoding(rawContent);
     const isAss = entry.entryName.toLowerCase().endsWith('.ass') || entry.entryName.toLowerCase().endsWith('.ssa');
-    return handleAiResponse(req, res, fixedBuffer, isAss);
-  } catch (e) { res.status(500).send('Error extracting ZIP'); }
+
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Headers', '*');
+
+    if (isAss) {
+      res.setHeader('Content-Type', 'text/x-ssa; charset=utf-8');
+      res.setHeader('Content-Disposition', 'inline; filename="subtitle.ssa"');
+    } else {
+      res.setHeader('Content-Type', 'application/x-subrip; charset=utf-8');
+      res.setHeader('Content-Disposition', 'inline; filename="subtitle.srt"');
+    }
+
+    res.send(content);
+  } catch (e) {
+    res.status(500).send('Error extracting ZIP');
+  }
 });
 
 app.all(['/stream-subsource', '/stream-subsource.srt', '/stream-subsource.ass', '/stream-subsource.ssa'], async (req, res) => {
   if (req.method === 'OPTIONS') return res.sendStatus(200);
-  const dataUrl = req.query.data; if (!dataUrl) return res.status(400).send('Missing data');
+  const dataUrl = req.query.data;
+  if (!dataUrl) return res.status(400).send('Missing data');
+
   try {
-    const buffer = await fetchSubSourceBuffer(dataUrl); let finalBuffer = buffer; let isAss = dataUrl.includes('.ass') || dataUrl.includes('.ssa');
+    const buffer = await fetchSubSourceBuffer(dataUrl);
+    let finalBuffer = buffer;
+    let isAss = dataUrl.includes('.ass') || dataUrl.includes('.ssa');
+
     if (buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4b) {
-      const zip = new AdmZip(buffer); const entries = zip.getEntries();
+      const zip = new AdmZip(buffer);
+      const entries = zip.getEntries();
       const subEntry = entries.find(e => !e.isDirectory && (e.entryName.endsWith('.srt') || e.entryName.endsWith('.ass') || e.entryName.endsWith('.ssa')));
-      if (subEntry) { finalBuffer = subEntry.getData(); isAss = subEntry.entryName.toLowerCase().endsWith('.ass') || subEntry.entryName.toLowerCase().endsWith('.ssa'); }
+      if (subEntry) {
+        finalBuffer = subEntry.getData();
+        isAss = subEntry.entryName.toLowerCase().endsWith('.ass') || subEntry.entryName.toLowerCase().endsWith('.ssa');
+      }
     }
+
     finalBuffer = fixArabicEncoding(finalBuffer);
-    if (finalBuffer.slice(0, 300).toString('utf-8').includes('[Script Info]')) isAss = true;
-    return handleAiResponse(req, res, finalBuffer, isAss);
-  } catch (e) { res.status(500).send('Error streaming SubSource'); }
+    if (finalBuffer.slice(0, 300).toString('utf-8').includes('[Script Info]')) {
+      isAss = true;
+    }
+
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Headers', '*');
+
+    if (isAss) {
+      res.setHeader('Content-Type', 'text/x-ssa; charset=utf-8');
+      res.setHeader('Content-Disposition', 'inline; filename="subtitle.ssa"');
+    } else {
+      res.setHeader('Content-Type', 'application/x-subrip; charset=utf-8');
+      res.setHeader('Content-Disposition', 'inline; filename="subtitle.srt"');
+    }
+
+    res.send(finalBuffer);
+  } catch (e) {
+    res.status(500).send('Error streaming SubSource');
+  }
 });
 
-if (process.env.NODE_ENV !== 'production') { app.listen(PORT, () => console.log(`Server listening on port ${PORT}`)); }
+if (process.env.NODE_ENV !== 'production') {
+  app.listen(PORT, () => {
+    console.log(`Server listening on port ${PORT}`);
+  });
+}
+
 module.exports = app;
