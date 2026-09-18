@@ -1,25 +1,9 @@
 const axios = require('axios');
-const iconv = require('iconv-lite');
 
 // مفتاح ورابط APInex الثابت
 const APINEX_BASE_URL = 'https://api.apinex.bond/v1/chat/completions';
 const APINEX_API_KEY = 'sk-apxf8963dbb2a56ef32027e48d2168c34609153354867ceae7';
 const APINEX_MODEL = 'free/claude-sonnet-4.6'; 
-
-const ASS_DEFAULT_HEADER = `[Script Info]
-ScriptType: v4.00+
-Collisions: Normal
-PlayDepth: 0
-WrapStyle: 0
-ScaledBorderAndShadow: yes
-
-[V4+ Styles]
-Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Arial,26,&H00FFFFFF,&H000000FF,&H00000000,&H96000000,-1,0,0,0,100,100,0,0,1,2,2,2,10,10,20,1
-
-[Events]
-Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
-`;
 
 function srtTimeToAss(t) {
   const m = t.match(/(\d+):(\d{2}):(\d{2}),(\d{3})/);
@@ -89,7 +73,7 @@ async function runConcurrentPool(tasks, limit = 2) {
   return results;
 }
 
-async function translateChunkStrict(texts, keys) {
+async function translateChunkStrict(texts) {
   const prompt = `You are an automated subtitle translator. Target Language: ARABIC ONLY.
 Task: Translate the JSON array of strings into Arabic.
 Rules:
@@ -105,7 +89,7 @@ Input: ${JSON.stringify(texts)}`;
       { model: APINEX_MODEL, messages: [{ role: 'user', content: prompt }] },
       {
         headers: { Authorization: `Bearer ${APINEX_API_KEY}`, 'Content-Type': 'application/json' },
-        timeout: 20000,
+        timeout: 25000,
         validateStatus: function (status) { return status < 500; }
       }
     );
@@ -115,27 +99,10 @@ Input: ${JSON.stringify(texts)}`;
     }
   } catch (e) {}
 
-  if (keys && keys.groqKey) {
-    try {
-      const r = await axios.post(
-        'https://api.groq.com/openai/v1/chat/completions',
-        { model: 'llama-3.1-8b-instant', messages: [{ role: 'user', content: prompt }], response_format: { type: 'json_object' } },
-        {
-          headers: { Authorization: `Bearer ${keys.groqKey.trim()}`, 'Content-Type': 'application/json' },
-          timeout: 10000,
-          validateStatus: function (status) { return status < 500; }
-        }
-      );
-      if (r.status === 200) {
-          const parsedArr = parseRobustJsonArray(r.data?.choices?.[0]?.message?.content, texts.length);
-          if (parsedArr && parsedArr.length > 0) return parsedArr;
-      }
-    } catch (e) {}
-  }
   return null;
 }
 
-async function handleTranslationSrt(originalText, keys) {
+async function handleTranslationSrt(originalText) {
   const cues = extractCuesUniversal(originalText);
   if (!cues.length) return "1\n00:00:01,000 --> 00:00:08,000\n[النظام] تعذر استخراج النصوص للترجمة.\n";
 
@@ -145,7 +112,7 @@ async function handleTranslationSrt(originalText, keys) {
 
   const tasks = chunks.map(chunk => async () => {
     const texts = chunk.map(c => c.text);
-    const translated = await translateChunkStrict(texts, keys);
+    const translated = await translateChunkStrict(texts);
     return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : "ـ");
   });
 
@@ -165,9 +132,9 @@ async function handleTranslationSrt(originalText, keys) {
   return srtOutput;
 }
 
-async function handleTranslationAss(originalText, keys) {
+async function handleTranslationAss(originalText) {
   const cues = extractCuesUniversal(originalText);
-  if (!cues.length) return ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[النظام] تعذر استخراج نصوص الترجمة المصدر.`;
+  if (!cues.length) return "Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[النظام] تعذر استخراج نصوص الترجمة المصدر.\n";
 
   const CHUNK = 40;
   const chunks = [];
@@ -175,14 +142,14 @@ async function handleTranslationAss(originalText, keys) {
 
   const tasks = chunks.map(chunk => async () => {
     const texts = chunk.map(c => c.text);
-    const translated = await translateChunkStrict(texts, keys);
+    const translated = await translateChunkStrict(texts);
     return chunk.map((_, idx) => (translated && translated[idx]) ? translated[idx] : "ـ");
   });
 
   const chunkResults = await runConcurrentPool(tasks, 3);
   const finalTranslations = chunkResults.flat();
   const assLines = cues.map((c, idx) => `Dialogue: 0,${c.start},${c.end},Default,,0,0,0,,${finalTranslations[idx] || 'ـ'}`);
-  return ASS_DEFAULT_HEADER + assLines.join('\n') + '\n';
+  return assLines.join('\n') + '\n';
 }
 
 module.exports = { handleTranslationSrt, handleTranslationAss };
