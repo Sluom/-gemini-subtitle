@@ -1,12 +1,10 @@
 const axios = require('axios');
 const iconv = require('iconv-lite');
 
-const translationCache = new Map();
-
 // مفتاح ورابط APInex الثابت
 const APINEX_BASE_URL = 'https://api.apinex.bond/v1/chat/completions';
 const APINEX_API_KEY = 'sk-apxf8963dbb2a56ef32027e48d2168c34609153354867ceae7';
-// تغيير الموديل لأحد الموديلات المدعومة والمجانية في APInex
+// استخدام موديل مدعوم ومجاني
 const APINEX_MODEL = 'free/claude-sonnet-4.6'; 
 
 const ASS_DEFAULT_HEADER = `[Script Info]
@@ -115,7 +113,6 @@ Rules:
 Length: ${texts.length}.
 Input: ${JSON.stringify(texts)}`;
 
-  // 1. استخدام APInex كمصدر أساسي بحماية قوية
   try {
     const r = await axios.post(
       APINEX_BASE_URL,
@@ -129,9 +126,7 @@ Input: ${JSON.stringify(texts)}`;
           'Content-Type': 'application/json'
         },
         timeout: 20000,
-        validateStatus: function (status) {
-          return status < 500; // حل مشكلة الـ Crash
-        }
+        validateStatus: function (status) { return status < 500; }
       }
     );
     
@@ -139,11 +134,8 @@ Input: ${JSON.stringify(texts)}`;
         const parsedArr = parseRobustJsonArray(r.data?.choices?.[0]?.message?.content, texts.length);
         if (parsedArr && parsedArr.length > 0) return parsedArr;
     }
-  } catch (e) {
-    // تجاهل الخطأ بصمت لعدم إيقاف السيرفر
-  }
+  } catch (e) {}
 
-  // 2. البديل الاحتياطي (Groq)
   if (keys && keys.groqKey) {
     try {
       const r = await axios.post(
@@ -172,16 +164,14 @@ Input: ${JSON.stringify(texts)}`;
   return null;
 }
 
-// دالة لتوليد ترجمة SRT
 async function handleTranslationSrt(subUrl, keys) {
-  const cacheKey = `${subUrl}_translated_ar_srt`;
-  if (translationCache.has(cacheKey)) return translationCache.get(cacheKey);
-
   let r;
   try {
-      r = await axios.get(subUrl, { responseType: 'arraybuffer', timeout: 10000 });
+      const decodedUrl = decodeURIComponent(subUrl);
+      r = await axios.get(decodedUrl, { responseType: 'arraybuffer', timeout: 15000 });
   } catch (e) {
-      return "1\n00:00:01,000 --> 00:00:08,000\n[النظام] تعذر سحب الملف المصدر.\n";
+      console.error('[AI] Download Error (SRT):', e.message);
+      return "1\n00:00:01,000 --> 00:00:08,000\n[النظام] تعذر سحب الملف المصدر للترجمة.\n";
   }
 
   const originalText = safeDecodeText(Buffer.from(r.data));
@@ -214,19 +204,16 @@ async function handleTranslationSrt(subUrl, keys) {
     srtOutput += `${idx + 1}\n${sTime} --> ${eTime}\n${finalTranslations[idx] || 'ـ'}\n\n`;
   });
 
-  translationCache.set(cacheKey, srtOutput);
   return srtOutput;
 }
 
-// دالة لتوليد ترجمة ASS
 async function handleTranslationAss(subUrl, keys) {
-  const cacheKey = `${subUrl}_translated_ar_ass`;
-  if (translationCache.has(cacheKey)) return translationCache.get(cacheKey);
-
   let r;
   try {
-      r = await axios.get(subUrl, { responseType: 'arraybuffer', timeout: 10000 });
+      const decodedUrl = decodeURIComponent(subUrl);
+      r = await axios.get(decodedUrl, { responseType: 'arraybuffer', timeout: 15000 });
   } catch (e) {
+      console.error('[AI] Download Error (ASS):', e.message);
       return ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[النظام] تعذر سحب الملف المصدر.`;
   }
 
@@ -249,9 +236,7 @@ async function handleTranslationAss(subUrl, keys) {
   const finalTranslations = chunkResults.flat();
   const assLines = cues.map((c, idx) => `Dialogue: 0,${c.start},${c.end},Default,,0,0,0,,${finalTranslations[idx] || 'ـ'}`);
 
-  const finalAssOutput = ASS_DEFAULT_HEADER + assLines.join('\n') + '\n';
-  translationCache.set(cacheKey, finalAssOutput);
-  return finalAssOutput;
+  return ASS_DEFAULT_HEADER + assLines.join('\n') + '\n';
 }
 
 module.exports = { handleTranslationSrt, handleTranslationAss };
