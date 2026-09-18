@@ -4,6 +4,7 @@ const axios = require('axios');
 const AdmZip = require('adm-zip');
 const iconv = require('iconv-lite');
 const zlib = require('zlib');
+
 const { resolveMedia } = require('./idMapper');
 const { getOpenSubtitles } = require('./opensubtitles');
 const { getSubDL } = require('./subdl');
@@ -11,49 +12,93 @@ const { getSubSource, fetchSubSourceBuffer } = require('./subsource');
 const { getAnimeSubtitles } = require('./anime');
 
 let getWyzie = null;
-try { const wyzieMod = require('./wyzie'); getWyzie = wyzieMod.getWyzie || wyzieMod.getSubtitles || wyzieMod; } catch (e) { getWyzie = null; }
+try {
+  const wyzieMod = require('./wyzie');
+  getWyzie = wyzieMod.getWyzie || wyzieMod.getSubtitles || wyzieMod;
+} catch (e) {
+  getWyzie = null;
+}
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+
 const PORT = process.env.PORT || 7000;
 
 const MANIFEST = {
-  id: 'org.nuvio.aggregated.subtitles', version: '25.0.0', name: 'Nuvio Multi-Source Subtitles',
+  id: 'org.nuvio.aggregated.subtitles',
+  version: '25.0.0',
+  name: 'Nuvio Multi-Source Subtitles',
   description: 'Arabic & Multi-language subtitles from OpenSubtitles, SubDL, SubSource, Wyzie & Anime',
-  resources: ['subtitles'], types: ['movie', 'series', 'anime'], idPrefixes: ['tt', 'kitsu'], catalogs: [],
-  behaviorHints: { configurable: true, configurationRequired: false }
+  resources: ['subtitles'],
+  types: ['movie', 'series', 'anime'],
+  idPrefixes: ['tt', 'kitsu'],
+  catalogs: [],
+  behaviorHints: {
+    configurable: true,
+    configurationRequired: false
+  }
 };
 
 function fixArabicEncoding(buffer) {
   if (!buffer || !Buffer.isBuffer(buffer)) return buffer;
   if (buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4b) return buffer;
+
   if (buffer.length >= 2 && buffer[0] === 0xff && buffer[1] === 0xfe) {
-    try { return Buffer.from(iconv.decode(buffer, 'utf16-le'), 'utf-8'); } catch (e) {}
+    try {
+      const decodedUtf16 = iconv.decode(buffer, 'utf16-le');
+      return Buffer.from(decodedUtf16, 'utf-8');
+    } catch(e) {}
   }
   if (buffer.length >= 2 && buffer[0] === 0xfe && buffer[1] === 0xff) {
-    try { return Buffer.from(iconv.decode(buffer, 'utf16-be'), 'utf-8'); } catch (e) {}
+    try {
+      const decodedUtf16be = iconv.decode(buffer, 'utf16-be');
+      return Buffer.from(decodedUtf16be, 'utf-8');
+    } catch(e) {}
   }
+
   const utf8Text = buffer.toString('utf-8');
-  if (/[\u0600-\u06FF]/.test(utf8Text)) return buffer;
-  try { const d = iconv.decode(buffer, 'windows-1256'); if (/[\u0600-\u06FF]/.test(d)) return Buffer.from(d, 'utf-8'); } catch (e) {}
-  try { const d = iconv.decode(buffer, 'iso-8859-6'); if (/[\u0600-\u06FF]/.test(d)) return Buffer.from(d, 'utf-8'); } catch (e) {}
+  if (/[\u0600-\u06FF]/.test(utf8Text)) {
+    return buffer;
+  }
+
+  try {
+    const decodedWin = iconv.decode(buffer, 'windows-1256');
+    if (/[\u0600-\u06FF]/.test(decodedWin)) {
+      return Buffer.from(decodedWin, 'utf-8');
+    }
+  } catch (e) {}
+
+  try {
+    const decodedIso = iconv.decode(buffer, 'iso-8859-6');
+    if (/[\u0600-\u06FF]/.test(decodedIso)) {
+      return Buffer.from(decodedIso, 'utf-8');
+    }
+  } catch (e) {}
+
   return buffer;
 }
 
 function parseConfig(req) {
   let config = {
-    jimakuKey: process.env.JIMAKU_API_KEY || '', subsourceKey: process.env.SUBSOURCE_API_KEY || '',
-    openSubtitlesKey: process.env.OPENSUBTITLES_API_KEY || '', subdlKey: process.env.SUBDL_API_KEY || '',
+    jimakuKey: process.env.JIMAKU_API_KEY || '',
+    subsourceKey: process.env.SUBSOURCE_API_KEY || '',
+    openSubtitlesKey: process.env.OPENSUBTITLES_API_KEY || '',
+    subdlKey: process.env.SUBDL_API_KEY || '',
     wyzieKey: process.env.WYZIE_API_KEY || ''
   };
+
   const rawConfig = req.params.config;
   if (rawConfig) {
     try {
       const decodedUrl = decodeURIComponent(rawConfig);
-      config = { ...config, ...JSON.parse(Buffer.from(decodedUrl, 'base64').toString('utf-8')) };
+      const decodedB64 = Buffer.from(decodedUrl, 'base64').toString('utf-8');
+      config = { ...config, ...JSON.parse(decodedB64) };
     } catch (e) {
-      try { config = { ...config, ...JSON.parse(Buffer.from(rawConfig, 'base64').toString('utf-8')) }; } catch (e2) {}
+      try {
+        const decoded = Buffer.from(rawConfig, 'base64').toString('utf-8');
+        config = { ...config, ...JSON.parse(decoded) };
+      } catch (e2) {}
     }
   }
   return config;
@@ -69,7 +114,12 @@ function findEpisodeInZip(zip, episode) {
   const entries = zip.getEntries();
   const epNum = parseInt(episode, 10);
   const validExts = ['.srt', '.ass', '.ssa', '.vtt'];
-  const subEntries = entries.filter(e => { const n = e.entryName.toLowerCase(); return !e.isDirectory && validExts.some(ext => n.endsWith(ext)); });
+
+  const subEntries = entries.filter(e => {
+    const name = e.entryName.toLowerCase();
+    return !e.isDirectory && validExts.some(ext => name.endsWith(ext));
+  });
+
   if (!subEntries.length) return null;
 
   const patterns = [
@@ -78,14 +128,22 @@ function findEpisodeInZip(zip, episode) {
     new RegExp(`[\\[\\(]0*${epNum}[\\]\\)]`, 'i'),
     new RegExp(`\\b0*${epNum}\\b`, 'i')
   ];
+
   for (const pattern of patterns) {
     const matches = subEntries.filter(e => pattern.test(e.entryName));
     if (matches.length > 0) {
-      const assMatch = matches.find(e => { const n = e.entryName.toLowerCase(); return n.endsWith('.ass') || n.endsWith('.ssa'); });
+      const assMatch = matches.find(e => {
+        const n = e.entryName.toLowerCase();
+        return n.endsWith('.ass') || n.endsWith('.ssa');
+      });
       return assMatch || matches[0];
     }
   }
-  const defaultAss = subEntries.find(e => { const n = e.entryName.toLowerCase(); return n.endsWith('.ass') || n.endsWith('.ssa'); });
+
+  const defaultAss = subEntries.find(e => {
+    const n = e.entryName.toLowerCase();
+    return n.endsWith('.ass') || n.endsWith('.ssa');
+  });
   return defaultAss || subEntries[0] || null;
 }
 
@@ -97,58 +155,93 @@ function detectFormat(s) {
   const rawUrl = (s.url || '').toLowerCase();
 
   if (
-    formatVal === 'ssa' || subFormatVal === 'ssa' || extVal === 'ssa' || rawUrl.includes('.ssa') || rawUrl.includes('format=ssa') ||
+    formatVal === 'ssa' || subFormatVal === 'ssa' || extVal === 'ssa' ||
+    rawUrl.includes('.ssa') || rawUrl.includes('format=ssa') ||
     rawName.endsWith('.ssa') || rawName.includes('.ssa') || rawName.includes('[ssa]') ||
-    formatVal === 'ass' || subFormatVal === 'ass' || extVal === 'ass' || rawUrl.includes('.ass') || rawUrl.includes('format=ass') ||
+    formatVal === 'ass' || subFormatVal === 'ass' || extVal === 'ass' ||
+    rawUrl.includes('.ass') || rawUrl.includes('format=ass') ||
     rawName.endsWith('.ass') || rawName.includes('.ass') || rawName.includes('[ass]')
-  ) return 'ssa';
+  ) {
+    return 'ssa';
+  }
 
-  if (formatVal === 'vtt' || subFormatVal === 'vtt' || extVal === 'vtt' || rawUrl.includes('.vtt') || rawUrl.includes('format=vtt') || rawName.endsWith('.vtt')) return 'vtt';
+  if (
+    formatVal === 'vtt' || subFormatVal === 'vtt' || extVal === 'vtt' ||
+    rawUrl.includes('.vtt') || rawUrl.includes('format=vtt') || rawName.endsWith('.vtt')
+  ) {
+    return 'vtt';
+  }
 
   return 'srt';
 }
 
 app.post('/api/test-key', async (req, res) => {
   const { provider, key } = req.body;
-  if (!key || !key.trim()) return res.json({ success: false, message: 'يرجى إدخال المفتاح أولاً ⚠️', status: 'warn' });
+  if (!key || !key.trim()) {
+    return res.json({ success: false, message: 'يرجى إدخال المفتاح أولاً ⚠️', status: 'warn' });
+  }
+
   const cleanKey = key.trim();
 
   try {
     if (provider === 'jimaku') {
-      const r = await axios.get('https://jimaku.cc/api/entries/search?query=naruto', { headers: { 'Authorization': cleanKey }, timeout: 7000 });
+      const r = await axios.get('https://jimaku.cc/api/entries/search?query=naruto', {
+        headers: { 'Authorization': cleanKey },
+        timeout: 7000
+      });
       if (r.status === 200) return res.json({ success: true, message: 'مفتاح Jimaku صالح 100% ✅' });
     } else if (provider === 'subsource') {
-      const r = await axios.get('https://api.subsource.net/api/v1/movies/search?q=avatar&searchType=text', { headers: { 'X-API-Key': cleanKey }, timeout: 7000 });
+      const r = await axios.get('https://api.subsource.net/api/v1/movies/search?q=avatar&searchType=text', {
+        headers: { 'X-API-Key': cleanKey },
+        timeout: 7000
+      });
       if (r.status === 200) return res.json({ success: true, message: 'مفتاح SubSource صالح 100% ✅' });
     } else if (provider === 'opensubtitles') {
       let valid = false;
       try {
-        const r1 = await axios.get('https://api.opensubtitles.com/api/v1/infos/formats', { headers: { 'Api-Key': cleanKey, 'User-Agent': 'NuvioSubtitles v1.0' }, timeout: 7000 });
+        const r1 = await axios.get('https://api.opensubtitles.com/api/v1/infos/formats', {
+          headers: { 'Api-Key': cleanKey, 'User-Agent': 'NuvioSubtitles v1.0' },
+          timeout: 7000
+        });
         if (r1.status === 200) valid = true;
       } catch (e1) {}
+
       if (!valid) {
         try {
-          const r2 = await axios.get('https://api.opensubtitles.com/api/v1/subtitles?imdb_id=0133093', { headers: { 'Api-Key': cleanKey, 'User-Agent': 'NuvioSubtitles v1.0' }, timeout: 7000 });
+          const r2 = await axios.get('https://api.opensubtitles.com/api/v1/subtitles?imdb_id=0133093', {
+            headers: { 'Api-Key': cleanKey, 'User-Agent': 'NuvioSubtitles v1.0' },
+            timeout: 7000
+          });
           if (r2.status === 200) valid = true;
         } catch (e2) {}
       }
+
       if (valid) return res.json({ success: true, message: 'مفتاح OpenSubtitles صالح 100% ✅' });
     } else if (provider === 'subdl') {
       let valid = false;
       try {
-        const r1 = await axios.get(`https://api.subdl.com/api/v1/subtitles?api_key=${cleanKey}&imdb_id=tt0111161`, { headers: { 'Authorization': `Bearer ${cleanKey}`, 'X-API-Key': cleanKey }, timeout: 7000 });
+        const r1 = await axios.get(`https://api.subdl.com/api/v1/subtitles?api_key=${cleanKey}&imdb_id=tt0111161`, {
+          headers: { 'Authorization': `Bearer ${cleanKey}`, 'X-API-Key': cleanKey },
+          timeout: 7000
+        });
         if (r1.status === 200 && (r1.data?.status === true || r1.data?.results)) valid = true;
       } catch (e1) {}
+
       if (!valid) {
         try {
-          const r2 = await axios.get('https://api.subdl.com/api/v2/me', { headers: { 'Authorization': `Bearer ${cleanKey}`, 'X-API-Key': cleanKey }, timeout: 7000 });
+          const r2 = await axios.get('https://api.subdl.com/api/v2/me', {
+            headers: { 'Authorization': `Bearer ${cleanKey}`, 'X-API-Key': cleanKey },
+            timeout: 7000
+          });
           if (r2.status === 200 || r2.data?.status === true) valid = true;
         } catch (e2) {}
       }
+
       if (valid) return res.json({ success: true, message: 'مفتاح SubDL صالح 100% ✅' });
     } else if (provider === 'wyzie') {
       if (cleanKey.length > 10) return res.json({ success: true, message: 'مفتاح Wyzie Subs صالح 100% ✅' });
     }
+
     return res.json({ success: false, message: 'المفتاح غير صالح أو انتهت صلاحيته ❌', status: 'error' });
   } catch (err) {
     const errorDetail = err.response?.data?.error?.message || err.response?.data?.message || err.message || 'Service unavailable';
@@ -194,7 +287,9 @@ function renderHtml(config) {
 <body>
   <div class="container">
     <h1 class="main-title">إعدادات كافة مواقع ومفاتيح الترجمة</h1>
+
     <h2 class="section-title">🎌 مواقع ومصادر ترجمات الأنمي التخصصية</h2>
+
     <div class="card">
       <div class="card-header">
         <span class="card-label">مفتاح Jimaku.cc API (اختياري للأنمي):</span>
@@ -206,7 +301,9 @@ function renderHtml(config) {
       </div>
       <div id="status-jimaku" class="status-box"></div>
     </div>
+
     <h2 class="section-title">🌐 قواعد بيانات ومزودات الترجمة العامة</h2>
+
     <div class="card">
       <div class="card-header">
         <span class="card-label">مفتاح SubSource API:</span>
@@ -218,6 +315,7 @@ function renderHtml(config) {
       </div>
       <div id="status-subsource" class="status-box"></div>
     </div>
+
     <div class="card">
       <div class="card-header">
         <span class="card-label">مفتاح OpenSubtitles.com API:</span>
@@ -229,6 +327,7 @@ function renderHtml(config) {
       </div>
       <div id="status-opensubtitles" class="status-box"></div>
     </div>
+
     <div class="card">
       <div class="card-header">
         <span class="card-label">مفتاح SubDL API:</span>
@@ -240,6 +339,7 @@ function renderHtml(config) {
       </div>
       <div id="status-subdl" class="status-box"></div>
     </div>
+
     <div class="card">
       <div class="card-header">
         <span class="card-label">مفتاح Wyzie Subs API:</span>
@@ -251,31 +351,47 @@ function renderHtml(config) {
       </div>
       <div id="status-wyzie" class="status-box"></div>
     </div>
+
     <div class="actions">
       <button class="btn-action btn-install" onclick="installAddon()">تثبيت الإضافة في Nuvio و Stremio 🚀</button>
       <button id="copyBtn" class="btn-action btn-copy" style="display: none;" onclick="copyManifestUrl()">نسخ رابط المانيفست (Manifest URL) 📋</button>
     </div>
   </div>
+
   <script>
     async function checkKey(provider) {
-      const input = document.getElementById(provider === 'jimaku' ? 'jimakuKey' : provider === 'subsource' ? 'subsourceKey' : provider === 'opensubtitles' ? 'openSubtitlesKey' : provider === 'subdl' ? 'subdlKey' : 'wyzieKey');
+      const input = document.getElementById(provider === 'jimaku' ? 'jimakuKey' :
+                                           provider === 'subsource' ? 'subsourceKey' :
+                                           provider === 'opensubtitles' ? 'openSubtitlesKey' :
+                                           provider === 'subdl' ? 'subdlKey' : 'wyzieKey');
       const statusEl = document.getElementById('status-' + provider);
       const val = input.value.trim();
+
       statusEl.className = 'status-box';
       statusEl.style.display = 'block';
       statusEl.innerText = 'جارٍ الفحص...';
+
       try {
-        const res = await fetch('/api/test-key', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ provider, key: val }) });
+        const res = await fetch('/api/test-key', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ provider, key: val })
+        });
         const data = await res.json();
         statusEl.innerText = data.message;
-        if (data.success) statusEl.className = 'status-box success';
-        else if (data.status === 'warn') statusEl.className = 'status-box warn';
-        else statusEl.className = 'status-box error';
+        if (data.success) {
+          statusEl.className = 'status-box success';
+        } else if (data.status === 'warn') {
+          statusEl.className = 'status-box warn';
+        } else {
+          statusEl.className = 'status-box error';
+        }
       } catch (e) {
         statusEl.className = 'status-box error';
         statusEl.innerText = 'فشل الاتصال بالسيرفر ❌';
       }
     }
+
     function buildConfigString() {
       const payload = {
         jimakuKey: document.getElementById('jimakuKey').value.trim(),
@@ -284,17 +400,24 @@ function renderHtml(config) {
         subdlKey: document.getElementById('subdlKey').value.trim(),
         wyzieKey: document.getElementById('wyzieKey').value.trim()
       };
+      
       const jsonStr = JSON.stringify(payload);
       const b64 = btoa(unescape(encodeURIComponent(jsonStr)));
       return encodeURIComponent(b64);
     }
+
     function installAddon() {
       const b64 = buildConfigString();
       const host = window.location.host;
+
       const copyBtn = document.getElementById('copyBtn');
-      if (copyBtn) copyBtn.style.display = 'flex';
+      if (copyBtn) {
+        copyBtn.style.display = 'flex';
+      }
+
       window.location.href = 'stremio://' + host + '/' + b64 + '/manifest.json';
     }
+
     function copyManifestUrl() {
       const b64 = buildConfigString();
       const url = 'https://' + window.location.host + '/' + b64 + '/manifest.json';
@@ -311,24 +434,40 @@ function renderHtml(config) {
 
 app.get(['/', '/configure', '/:config/configure'], (req, res) => {
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
-  res.send(renderHtml(parseConfig(req)));
+  const config = parseConfig(req);
+  res.send(renderHtml(config));
 });
 
 app.get(['/manifest.json', '/:config/manifest.json'], (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Headers', '*');
   res.setHeader('Content-Type', 'application/json');
+
   const config = req.params.config;
-  res.json({ ...MANIFEST, behaviorHints: { configurable: true, configurationRequired: !config } });
+  const manifest = {
+    ...MANIFEST,
+    behaviorHints: {
+      configurable: true,
+      configurationRequired: !config
+    }
+  };
+  res.json(manifest);
 });
 
-app.get(['/subtitles/:type/:id', '/subtitles/:type/:id/:extra', '/:config/subtitles/:type/:id', '/:config/subtitles/:type/:id/:extra'], async (req, res) => {
+app.get([
+  '/subtitles/:type/:id', 
+  '/subtitles/:type/:id/:extra',
+  '/:config/subtitles/:type/:id',
+  '/:config/subtitles/:type/:id/:extra'
+], async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Headers', '*');
   res.setHeader('Content-Type', 'application/json');
 
   let targetId = req.params.id || '';
-  if (targetId.endsWith('.json')) targetId = targetId.slice(0, -5);
+  if (targetId.endsWith('.json')) {
+    targetId = targetId.slice(0, -5);
+  }
 
   const type = req.params.type;
   const config = parseConfig(req);
@@ -342,21 +481,55 @@ app.get(['/subtitles/:type/:id', '/subtitles/:type/:id/:extra', '/:config/subtit
     const title = media.title || imdbId;
     const mediaType = media.type || type;
 
-    const tasks = [getAnimeSubtitles(targetId, episode, config.jimakuKey, title).catch(() => [])];
+    const tasks = [
+      getAnimeSubtitles(targetId, episode, config.jimakuKey, title).catch(() => [])
+    ];
 
     if (imdbId) {
-      tasks.push(getOpenSubtitles({ imdbId, season, episode, type: mediaType, apiKey: config.openSubtitlesKey }).catch(() => []));
-      tasks.push(getSubDL({ imdbId, season, episode, type: mediaType, apiKey: config.subdlKey }).catch(() => []));
+      tasks.push(getOpenSubtitles({
+        imdbId,
+        season,
+        episode,
+        type: mediaType,
+        apiKey: config.openSubtitlesKey
+      }).catch(() => []));
+
+      tasks.push(getSubDL({
+        imdbId,
+        season,
+        episode,
+        type: mediaType,
+        apiKey: config.subdlKey
+      }).catch(() => []));
     }
+
     if (config.subsourceKey && (title || imdbId)) {
-      tasks.push(getSubSource({ title, imdbId, season, episode, type: mediaType, apiKey: config.subsourceKey }).catch(() => []));
+      tasks.push(getSubSource({
+        title,
+        imdbId,
+        season,
+        episode,
+        type: mediaType,
+        apiKey: config.subsourceKey
+      }).catch(() => []));
     }
+
     if (getWyzie && imdbId) {
-      tasks.push(getWyzie({ imdbId, season, episode, type: mediaType, apiKey: config.wyzieKey }).catch(() => []));
+      tasks.push(getWyzie({
+        imdbId,
+        season,
+        episode,
+        type: mediaType,
+        apiKey: config.wyzieKey
+      }).catch(() => []));
     }
 
     const settled = await Promise.allSettled(tasks);
-    const allSubs = settled.filter(r => r.status === 'fulfilled').flatMap(r => r.value).filter(s => s && s.url);
+    const allSubs = settled
+      .filter(r => r.status === 'fulfilled')
+      .flatMap(r => r.value)
+      .filter(s => s && s.url);
+
     const sourceCounters = {};
 
     const formatted = allSubs.map((s) => {
@@ -376,6 +549,7 @@ app.get(['/subtitles/:type/:id', '/subtitles/:type/:id/:extra', '/:config/subtit
       const groupKey = `${siteName}-${ext}`;
       sourceCounters[groupKey] = (sourceCounters[groupKey] || 0) + 1;
       const count = sourceCounters[groupKey];
+
       const isActuallyZip = s._isZip === true || s.url.toLowerCase().endsWith('.zip');
 
       if (isActuallyZip) {
@@ -395,7 +569,13 @@ app.get(['/subtitles/:type/:id', '/subtitles/:type/:id/:extra', '/:config/subtit
       const sourceTag = rawSource.replace(/[^a-z0-9]/g, '') || siteName.toLowerCase();
       const subId = `nuvio-${ext}-${sourceTag}-ara-${count}`;
 
-      return { id: subId, url: finalUrl, lang: s.lang || 'ara', format: ext, _priority: s._priority !== undefined ? s._priority : (isAssTrack ? 0 : 2) };
+      return {
+        id: subId,
+        url: finalUrl,
+        lang: s.lang || 'ara',
+        format: ext,
+        _priority: s._priority !== undefined ? s._priority : (isAssTrack ? 0 : 2)
+      };
     });
 
     formatted.sort((a, b) => {
@@ -408,7 +588,11 @@ app.get(['/subtitles/:type/:id', '/subtitles/:type/:id/:extra', '/:config/subtit
     });
 
     const seenUrls = new Set();
-    const uniqueSubs = formatted.filter(s => { if (seenUrls.has(s.url)) return false; seenUrls.add(s.url); return true; });
+    const uniqueSubs = formatted.filter(s => {
+      if (seenUrls.has(s.url)) return false;
+      seenUrls.add(s.url);
+      return true;
+    });
 
     res.json({ subtitles: uniqueSubs });
   } catch (err) {
@@ -422,10 +606,19 @@ app.all(['/stream-proxy', '/stream-proxy.srt', '/stream-proxy.ass', '/stream-pro
   if (!targetUrl) return res.status(400).send('Missing URL');
 
   try {
-    const response = await axios.get(targetUrl, { responseType: 'arraybuffer', timeout: 10000, headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' } });
+    const response = await axios.get(targetUrl, {
+      responseType: 'arraybuffer',
+      timeout: 10000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      }
+    });
+
     let buffer = Buffer.from(response.data);
 
-    if (buffer.length >= 2 && buffer[0] === 0x1f && buffer[1] === 0x8b) buffer = zlib.gunzipSync(buffer);
+    if (buffer.length >= 2 && buffer[0] === 0x1f && buffer[1] === 0x8b) {
+      buffer = zlib.gunzipSync(buffer);
+    }
 
     if (buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4b) {
       const zip = new AdmZip(buffer);
@@ -461,39 +654,67 @@ app.all(['/stream-os', '/stream-os.srt', '/stream-os.ass', '/stream-os.ssa'], as
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   const dataUrl = req.query.data || '';
   const apiKey = req.query.key || '';
+
   if (!dataUrl) return res.status(400).send('Missing data');
 
   try {
     const parsed = new URL(dataUrl.replace('os://', 'http://dummy.com/'));
     const fileId = parseInt(parsed.pathname.replace('/', ''), 10);
     const formatParam = (parsed.searchParams.get('format') || 'srt').toLowerCase();
+
     if (!fileId || !apiKey) return res.status(400).send('Missing fileId or apiKey');
 
-    const dlRes = await axios.post('https://api.opensubtitles.com/api/v1/download', { file_id: fileId }, {
-      headers: { 'Api-Key': apiKey.trim(), 'User-Agent': 'NuvioSubtitles v1.0.0', 'Content-Type': 'application/json', 'Accept': 'application/json' },
-      timeout: 8000
-    });
+    const dlRes = await axios.post(
+      'https://api.opensubtitles.com/api/v1/download',
+      { file_id: fileId },
+      {
+        headers: {
+          'Api-Key': apiKey.trim(),
+          'User-Agent': 'NuvioSubtitles v1.0.0',
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        timeout: 8000
+      }
+    );
 
     const directLink = dlRes.data?.link;
     if (!directLink) return res.status(404).send('Download link not found');
 
-    const fileRes = await axios.get(directLink, { responseType: 'arraybuffer', timeout: 10000, headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36', 'Accept': '*/*' } });
+    const fileRes = await axios.get(directLink, {
+      responseType: 'arraybuffer',
+      timeout: 10000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': '*/*'
+      }
+    });
+
     let buffer = Buffer.from(fileRes.data);
 
-    if (buffer.length >= 2 && buffer[0] === 0x1f && buffer[1] === 0x8b) buffer = zlib.gunzipSync(buffer);
+    if (buffer.length >= 2 && buffer[0] === 0x1f && buffer[1] === 0x8b) {
+      buffer = zlib.gunzipSync(buffer);
+    }
 
     if (buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4b) {
       const zip = new AdmZip(buffer);
       const entries = zip.getEntries();
       const assEntry = entries.find(e => !e.isDirectory && (e.entryName.toLowerCase().endsWith('.ass') || e.entryName.toLowerCase().endsWith('.ssa')));
       const anySubEntry = entries.find(e => !e.isDirectory && (e.entryName.toLowerCase().endsWith('.srt') || e.entryName.toLowerCase().endsWith('.vtt')));
-      if (assEntry) buffer = assEntry.getData();
-      else if (anySubEntry) buffer = anySubEntry.getData();
+      
+      if (assEntry) {
+        buffer = assEntry.getData();
+      } else if (anySubEntry) {
+        buffer = anySubEntry.getData();
+      }
     }
 
     const fixedBuffer = fixArabicEncoding(buffer);
     const contentCheck = fixedBuffer.slice(0, 500).toString('utf-8');
-    const isActuallyAss = formatParam === 'ass' || formatParam === 'ssa' || contentCheck.includes('[Script Info]') || contentCheck.includes('V4+ Styles');
+    const isActuallyAss = formatParam === 'ass' || 
+                          formatParam === 'ssa' || 
+                          contentCheck.includes('[Script Info]') || 
+                          contentCheck.includes('V4+ Styles');
 
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', '*');
@@ -516,15 +737,25 @@ app.all(['/stream-zip', '/stream-zip.srt', '/stream-zip.ass', '/stream-zip.ssa']
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   const zipUrl = req.query.url;
   const ep = req.query.ep || '1';
+
   if (!zipUrl) return res.status(400).send('Missing URL');
 
   try {
-    const response = await axios.get(zipUrl, { responseType: 'arraybuffer', timeout: 10000, headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' } });
+    const response = await axios.get(zipUrl, {
+      responseType: 'arraybuffer',
+      timeout: 10000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      }
+    });
+
     const zip = new AdmZip(Buffer.from(response.data));
     const entry = findEpisodeInZip(zip, ep);
+
     if (!entry) return res.status(404).send('Episode not found in archive');
 
-    const content = fixArabicEncoding(entry.getData());
+    const rawContent = entry.getData();
+    const content = fixArabicEncoding(rawContent);
     const isAss = entry.entryName.toLowerCase().endsWith('.ass') || entry.entryName.toLowerCase().endsWith('.ssa');
 
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -565,7 +796,9 @@ app.all(['/stream-subsource', '/stream-subsource.srt', '/stream-subsource.ass', 
     }
 
     finalBuffer = fixArabicEncoding(finalBuffer);
-    if (finalBuffer.slice(0, 300).toString('utf-8').includes('[Script Info]')) isAss = true;
+    if (finalBuffer.slice(0, 300).toString('utf-8').includes('[Script Info]')) {
+      isAss = true;
+    }
 
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Headers', '*');
@@ -585,7 +818,9 @@ app.all(['/stream-subsource', '/stream-subsource.srt', '/stream-subsource.ass', 
 });
 
 if (process.env.NODE_ENV !== 'production') {
-  app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
+  app.listen(PORT, () => {
+    console.log(`Server listening on port ${PORT}`);
+  });
 }
 
 module.exports = app;
