@@ -672,7 +672,7 @@ app.get([
         lang: s.lang || 'ara',
         format: ext,
         _priority: s._priority !== undefined ? s._priority : (isAssTrack ? 0 : 2),
-        _originalUrl: finalUrl
+        _originalUrl: s.url // نحتفظ بالرابط الأصلي
       };
     });
 
@@ -696,13 +696,13 @@ app.get([
     const transSubs = [];
     
     // البحث عن أفضل ملف ترجمة متوفر (يفضل الإنجليزي إذا وجد، وإلا أي ملف آخر)
-    let bestSourceForTranslation = uniqueSubs.find(s => (s.lang === 'eng' || s.lang === 'en') && s.url);
+    let bestSourceForTranslation = uniqueSubs.find(s => (s.lang === 'eng' || s.lang === 'en') && s._originalUrl && !s._originalUrl.endsWith('.zip'));
     if (!bestSourceForTranslation) {
-        bestSourceForTranslation = uniqueSubs.find(s => s.url); 
+        bestSourceForTranslation = uniqueSubs.find(s => s._originalUrl && !s._originalUrl.endsWith('.zip')); 
     }
 
     if (bestSourceForTranslation) {
-      const sourceUrl = encodeURIComponent(bestSourceForTranslation._originalUrl || bestSourceForTranslation.url);
+      const sourceUrl = encodeURIComponent(bestSourceForTranslation._originalUrl);
       
       // بناء الروابط الأربعة وإعطاؤها أولوية 10 لتظهر في النهاية
       transSubs.push({
