@@ -1,5 +1,7 @@
 const axios = require('axios');
 const iconv = require('iconv-lite');
+const AdmZip = require('adm-zip');
+const zlib = require('zlib');
 
 // مفتاح ورابط APInex الثابت
 const APINEX_BASE_URL = 'https://api.apinex.bond/v1/chat/completions';
@@ -29,6 +31,28 @@ function srtTimeToAss(t) {
   return `${h}:${m[2]}:${m[3]}.${cs}`;
 }
 
+function fixArabicEncoding(buffer) {
+  if (!buffer || !Buffer.isBuffer(buffer)) return buffer;
+  if (buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4b) return buffer;
+  if (buffer.length >= 2 && buffer[0] === 0xff && buffer[1] === 0xfe) {
+    try { return Buffer.from(iconv.decode(buffer, 'utf16-le'), 'utf-8'); } catch(e) {}
+  }
+  if (buffer.length >= 2 && buffer[0] === 0xfe && buffer[1] === 0xff) {
+    try { return Buffer.from(iconv.decode(buffer, 'utf16-be'), 'utf-8'); } catch(e) {}
+  }
+  const utf8Text = buffer.toString('utf-8');
+  if (/[\u0600-\u06FF]/.test(utf8Text)) return buffer;
+  try {
+    const decodedWin = iconv.decode(buffer, 'windows-1256');
+    if (/[\u0600-\u06FF]/.test(decodedWin)) return Buffer.from(decodedWin, 'utf-8');
+  } catch (e) {}
+  try {
+    const decodedIso = iconv.decode(buffer, 'iso-8859-6');
+    if (/[\u0600-\u06FF]/.test(decodedIso)) return Buffer.from(decodedIso, 'utf-8');
+  } catch (e) {}
+  return buffer;
+}
+
 function extractCuesUniversal(text) {
   const assLines = text.split(/\r?\n/).filter(l => /^Dialogue:/i.test(l.trim()));
   if (assLines.length > 0) {
@@ -56,7 +80,6 @@ function extractCuesUniversal(text) {
 function parseRobustJsonArray(raw, expectedLength) {
   if (!raw) return null;
   let clean = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
-
   try {
     const parsed = JSON.parse(clean);
     const arr = Array.isArray(parsed) ? parsed : (parsed.translations || parsed.data || Object.values(parsed));
@@ -103,20 +126,13 @@ Input: ${JSON.stringify(texts)}`;
   try {
     const r = await axios.post(
       APINEX_BASE_URL,
+      { model: APINEX_MODEL, messages: [{ role: 'user', content: prompt }] },
       {
-        model: APINEX_MODEL,
-        messages: [{ role: 'user', content: prompt }]
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${APINEX_API_KEY}`,
-          'Content-Type': 'application/json'
-        },
+        headers: { Authorization: `Bearer ${APINEX_API_KEY}`, 'Content-Type': 'application/json' },
         timeout: 20000,
         validateStatus: function (status) { return status < 500; }
       }
     );
-    
     if (r.status === 200) {
         const parsedArr = parseRobustJsonArray(r.data?.choices?.[0]?.message?.content, texts.length);
         if (parsedArr && parsedArr.length > 0) return parsedArr;
@@ -127,16 +143,9 @@ Input: ${JSON.stringify(texts)}`;
     try {
       const r = await axios.post(
         'https://api.groq.com/openai/v1/chat/completions',
+        { model: 'llama-3.1-8b-instant', messages: [{ role: 'user', content: prompt }], response_format: { type: 'json_object' } },
         {
-          model: 'llama-3.1-8b-instant',
-          messages: [{ role: 'user', content: prompt }],
-          response_format: { type: 'json_object' }
-        },
-        {
-          headers: {
-            Authorization: `Bearer ${keys.groqKey.trim()}`,
-            'Content-Type': 'application/json'
-          },
+          headers: { Authorization: `Bearer ${keys.groqKey.trim()}`, 'Content-Type': 'application/json' },
           timeout: 10000,
           validateStatus: function (status) { return status < 500; }
         }
@@ -147,13 +156,58 @@ Input: ${JSON.stringify(texts)}`;
       }
     } catch (e) {}
   }
-
   return null;
 }
 
-async function handleTranslationSrt(originalText, keys) {
-  const cues = extractCuesUniversal(originalText);
+async function fetchAndExtractSub(subUrl, keys) {
+    let response;
+    // إذا كان الرابط يخص OpenSubtitles
+    if (subUrl.startsWith('os://')) {
+        const dataUrl = subUrl.replace('os://', 'http://dummy.com/');
+        const parsed = new URL(dataUrl);
+        const fileId = parseInt(parsed.pathname.replace('/', ''), 10);
+        const apiKey = keys.openSubtitlesKey || '';
+        
+        if (!fileId || !apiKey) throw new Error("Missing OpenSubtitles config");
+        
+        const dlRes = await axios.post(
+            'https://api.opensubtitles.com/api/v1/download',
+            { file_id: fileId },
+            { headers: { 'Api-Key': apiKey.trim(), 'User-Agent': 'NuvioSubtitles v1.0.0', 'Content-Type': 'application/json' }, timeout: 8000 }
+        );
+        const directLink = dlRes.data?.link;
+        if (!directLink) throw new Error("OS direct link not found");
+        
+        response = await axios.get(directLink, { responseType: 'arraybuffer', timeout: 15000 });
+    } else {
+        response = await axios.get(subUrl, { responseType: 'arraybuffer', timeout: 15000 });
+    }
 
+    let buffer = Buffer.from(response.data);
+    if (buffer.length >= 2 && buffer[0] === 0x1f && buffer[1] === 0x8b) {
+      buffer = zlib.gunzipSync(buffer);
+    }
+    if (buffer.length >= 2 && buffer[0] === 0x50 && buffer[1] === 0x4b) {
+      const zip = new AdmZip(buffer);
+      const entries = zip.getEntries();
+      const assEntry = entries.find(e => !e.isDirectory && (e.entryName.toLowerCase().endsWith('.ass') || e.entryName.toLowerCase().endsWith('.ssa')));
+      const subEntry = entries.find(e => !e.isDirectory && e.entryName.toLowerCase().endsWith('.srt'));
+      if (assEntry) buffer = assEntry.getData();
+      else if (subEntry) buffer = subEntry.getData();
+    }
+    return fixArabicEncoding(buffer).toString('utf-8');
+}
+
+async function handleTranslationSrt(subUrl, keys) {
+  let originalText = "";
+  try {
+      originalText = await fetchAndExtractSub(subUrl, keys);
+  } catch (e) {
+      console.error('[AI] Download Error (SRT):', e.message);
+      return "1\n00:00:01,000 --> 00:00:08,000\n[النظام] تعذر سحب الملف المصدر للترجمة.\n";
+  }
+
+  const cues = extractCuesUniversal(originalText);
   if (!cues.length) return "1\n00:00:01,000 --> 00:00:08,000\n[النظام] تعذر استخراج النصوص للترجمة.\n";
 
   const CHUNK = 40;
@@ -177,16 +231,21 @@ async function handleTranslationSrt(originalText, keys) {
     if (eTime.length === 10) eTime = '0' + eTime;
     if (sTime.split(',')[1].length === 2) sTime += '0';
     if (eTime.split(',')[1].length === 2) eTime += '0';
-
     srtOutput += `${idx + 1}\n${sTime} --> ${eTime}\n${finalTranslations[idx] || 'ـ'}\n\n`;
   });
-
   return srtOutput;
 }
 
-async function handleTranslationAss(originalText, keys) {
-  const cues = extractCuesUniversal(originalText);
+async function handleTranslationAss(subUrl, keys) {
+  let originalText = "";
+  try {
+      originalText = await fetchAndExtractSub(subUrl, keys);
+  } catch (e) {
+      console.error('[AI] Download Error (ASS):', e.message);
+      return ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[النظام] تعذر سحب الملف المصدر.`;
+  }
 
+  const cues = extractCuesUniversal(originalText);
   if (!cues.length) return ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[النظام] تعذر استخراج نصوص الترجمة المصدر.`;
 
   const CHUNK = 40;
@@ -202,7 +261,6 @@ async function handleTranslationAss(originalText, keys) {
   const chunkResults = await runConcurrentPool(tasks, 3);
   const finalTranslations = chunkResults.flat();
   const assLines = cues.map((c, idx) => `Dialogue: 0,${c.start},${c.end},Default,,0,0,0,,${finalTranslations[idx] || 'ـ'}`);
-
   return ASS_DEFAULT_HEADER + assLines.join('\n') + '\n';
 }
 
