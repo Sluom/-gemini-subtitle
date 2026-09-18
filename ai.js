@@ -4,7 +4,6 @@ const iconv = require('iconv-lite');
 // مفتاح ورابط APInex الثابت
 const APINEX_BASE_URL = 'https://api.apinex.bond/v1/chat/completions';
 const APINEX_API_KEY = 'sk-apxf8963dbb2a56ef32027e48d2168c34609153354867ceae7';
-// استخدام موديل مدعوم ومجاني
 const APINEX_MODEL = 'free/claude-sonnet-4.6'; 
 
 const ASS_DEFAULT_HEADER = `[Script Info]
@@ -28,18 +27,6 @@ function srtTimeToAss(t) {
   const h = parseInt(m[1], 10);
   const cs = Math.floor(parseInt(m[4], 10) / 10).toString().padStart(2, '0');
   return `${h}:${m[2]}:${m[3]}.${cs}`;
-}
-
-function safeDecodeText(buf) {
-  try {
-    return new TextDecoder('utf-8', { fatal: true }).decode(buf);
-  } catch (e) {
-    try {
-      return iconv.decode(buf, 'win1256');
-    } catch (e2) {
-      return buf.toString('utf8');
-    }
-  }
 }
 
 function extractCuesUniversal(text) {
@@ -164,17 +151,7 @@ Input: ${JSON.stringify(texts)}`;
   return null;
 }
 
-async function handleTranslationSrt(subUrl, keys) {
-  let r;
-  try {
-      const decodedUrl = decodeURIComponent(subUrl);
-      r = await axios.get(decodedUrl, { responseType: 'arraybuffer', timeout: 15000 });
-  } catch (e) {
-      console.error('[AI] Download Error (SRT):', e.message);
-      return "1\n00:00:01,000 --> 00:00:08,000\n[النظام] تعذر سحب الملف المصدر للترجمة.\n";
-  }
-
-  const originalText = safeDecodeText(Buffer.from(r.data));
+async function handleTranslationSrt(originalText, keys) {
   const cues = extractCuesUniversal(originalText);
 
   if (!cues.length) return "1\n00:00:01,000 --> 00:00:08,000\n[النظام] تعذر استخراج النصوص للترجمة.\n";
@@ -207,17 +184,7 @@ async function handleTranslationSrt(subUrl, keys) {
   return srtOutput;
 }
 
-async function handleTranslationAss(subUrl, keys) {
-  let r;
-  try {
-      const decodedUrl = decodeURIComponent(subUrl);
-      r = await axios.get(decodedUrl, { responseType: 'arraybuffer', timeout: 15000 });
-  } catch (e) {
-      console.error('[AI] Download Error (ASS):', e.message);
-      return ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[النظام] تعذر سحب الملف المصدر.`;
-  }
-
-  const originalText = safeDecodeText(Buffer.from(r.data));
+async function handleTranslationAss(originalText, keys) {
   const cues = extractCuesUniversal(originalText);
 
   if (!cues.length) return ASS_DEFAULT_HEADER + `Dialogue: 0,0:00:01.00,0:00:08.00,Default,,0,0,0,,[النظام] تعذر استخراج نصوص الترجمة المصدر.`;
