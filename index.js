@@ -671,7 +671,7 @@ app.get([
         lang: s.lang || 'ara',
         format: ext,
         _priority: s._priority !== undefined ? s._priority : (isAssTrack ? 0 : 2),
-        _originalUrl: s._originalUrl || s.url
+        _originalUrl: s.url // نحتفظ بالرابط الأصلي
       };
     });
 
@@ -695,13 +695,13 @@ app.get([
     const transSubs = [];
     
     // نرسل الرابط الأصلي مباشرة لملف ai.js وهو يتكفل بتحميله وفك ضغطه
-    let bestSourceForTranslation = uniqueSubs.find(s => (s.lang === 'eng' || s.lang === 'en') && s._originalUrl);
+    let bestSourceForTranslation = uniqueSubs.find(s => (s.lang === 'eng' || s.lang === 'en') && s.url);
     if (!bestSourceForTranslation) {
-        bestSourceForTranslation = uniqueSubs.find(s => s._originalUrl); 
+        bestSourceForTranslation = uniqueSubs.find(s => s.url); 
     }
 
     if (bestSourceForTranslation) {
-      const sourceUrl = encodeURIComponent(bestSourceForTranslation._originalUrl);
+      const sourceUrl = encodeURIComponent(bestSourceForTranslation.url);
       
       transSubs.push({
         id: `trans-srt-1`,
@@ -998,9 +998,3 @@ if (process.env.NODE_ENV !== 'production') {
 }
 
 module.exports = app;
-
-تأكد من هذا التعديل اللي سويناه مال
-const transSubs = []; // نرسل الرابط الأصلي مباشرة لملف ai.js وهو يتكفل بتحميله وفك ضغطه let bestSourceForTranslation = uniqueSubs.find(s => (s.lang === 'eng' || s.lang === 'en') && s._originalUrl); if (!bestSourceForTranslation) { bestSourceForTranslation = uniqueSubs.find(s => s._originalUrl); } if (bestSourceForTranslation) { const sourceUrl = encodeURIComponent(bestSourceForTranslation._originalUrl); transSubs.push({ id: `trans-srt-1`, url: `${baseUrl}/stream-ai.srt?url=${sourceUrl}`, lang: 'ara', format: 'srt', _priority: 10 }); transSubs.push({ id: `trans-srt-2`, url: `${baseUrl}/stream-ai.srt?url=${sourceUrl}`, lang: 'ara', format: 'srt', _priority: 10 }); transSubs.push({ id: `trans-ass-1`, url: `${baseUrl}/stream-ai.ass?url=${sourceUrl}`, lang: 'ara', format: 'ass', _priority: 11 }); transSubs.push({ id: `trans-ass-2`, url: `${baseUrl}/stream-ai.ass?url=${sourceUrl}`, lang: 'ara', format: 'ass', _priority: 11 }); }
-
-اريد كل شي سليم من ترفع ل اي اي لا تخلي ديكود قبل كود سورس وتجربة انت تسوي خطأ ما ينتبه عليه اله العباقرة مثلكم
-راجع كل التعديلات واعملي الكودين النهائيين
