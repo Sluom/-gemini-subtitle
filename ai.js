@@ -161,9 +161,12 @@ Input: ${JSON.stringify(texts)}`;
 
 async function fetchAndExtractSub(subUrl, keys) {
     let response;
+    // فك التشفير عن الرابط المستلم فقط مرة واحدة هنا
+    const decodedUrl = decodeURIComponent(subUrl);
+    
     // إذا كان الرابط يخص OpenSubtitles
-    if (subUrl.startsWith('os://')) {
-        const dataUrl = subUrl.replace('os://', 'http://dummy.com/');
+    if (decodedUrl.startsWith('os://')) {
+        const dataUrl = decodedUrl.replace('os://', 'http://dummy.com/');
         const parsed = new URL(dataUrl);
         const fileId = parseInt(parsed.pathname.replace('/', ''), 10);
         const apiKey = keys.openSubtitlesKey || '';
@@ -180,7 +183,7 @@ async function fetchAndExtractSub(subUrl, keys) {
         
         response = await axios.get(directLink, { responseType: 'arraybuffer', timeout: 15000 });
     } else {
-        response = await axios.get(subUrl, { responseType: 'arraybuffer', timeout: 15000 });
+        response = await axios.get(decodedUrl, { responseType: 'arraybuffer', timeout: 15000 });
     }
 
     let buffer = Buffer.from(response.data);
