@@ -1,6 +1,6 @@
 const axios = require('axios');
 
-const USER_AGENT = 'NuvioSubtitles v1.0.0';
+const USER_AGENT = 'VLSub 0.10.3';
 const TIMEOUT = 8000;
 
 function getAxiosConfig(apiKey) {
@@ -36,18 +36,18 @@ function matchEpisode(fileName, targetEpisode) {
   if (!targetEpisode) return true; // إذا كان فيلم مو مسلسل
   const name = (fileName || '').toLowerCase();
   
-  // إذا كان الملف مضغوط بحزمة zip/rar، نمرره لأن index.js سيتولى فك الضغط واستخراج الحلقة
+  // إذا كان الملف مضغوط بحزمة zip/rar، نمرره
   if (name.includes('.zip') || name.includes('.rar')) return true;
 
   const epStr = parseInt(targetEpisode, 10).toString();
   
   // أنماط البحث (Regex) لاصطياد رقم الحلقة مهما كان شكل التسمية
   const patterns = [
-    new RegExp(`(?:s0*\\d+[._ -]*)?(?:e|ep|episode)[._ -]*0*${epStr}(?:[^0-9]|$)`, 'i'), // S01E05, Ep05
-    new RegExp(`[._ -]0*${epStr}[._ -]`, 'i'), // - 05 - , _05_
-    new RegExp(`\\[0*${epStr}\\]`, 'i'), // [05]
-    new RegExp(`\\(0*${epStr}\\)`, 'i'), // (05)
-    new RegExp(`\\b0*${epStr}\\b`, 'i') // 05 (كلمة مستقلة)
+    new RegExp(`(?:s0*\\d+[._ -]*)?(?:e|ep|episode)[._ -]*0*${epStr}(?:[^0-9]|$)`, 'i'),
+    new RegExp(`[._ -]0*${epStr}[._ -]`, 'i'),
+    new RegExp(`\\[0*${epStr}\\]`, 'i'),
+    new RegExp(`\\(0*${epStr}\\)`, 'i'),
+    new RegExp(`\\b0*${epStr}\\b`, 'i')
   ];
 
   return patterns.some(p => p.test(name));
@@ -113,19 +113,19 @@ async function fetchOfficial(imdbId, season, episode, type, apiKey) {
   }
 }
 
-// دالة جلب بيانات السيرفر القديم
+// دالة جلب بيانات السيرفر القديم (معدلة للرابط المباشر واستخدام axios)
 async function fetchLegacyData(url) {
   try {
-    const response = await fetch(url, {
+    const response = await axios.get(url, {
       headers: {
-        'User-Agent': 'VLSub 0.10.3', 
-        'X-User-Agent': 'VLSub 0.10.3',
+        'User-Agent': USER_AGENT,
+        'X-User-Agent': USER_AGENT,
         'Accept': 'application/json'
-      }
+      },
+      timeout: TIMEOUT
     });
 
-    if (!response.ok) return [];
-    const data = await response.json();
+    const data = response.data;
     if (!Array.isArray(data)) return [];
 
     const results = [];
@@ -138,8 +138,11 @@ async function fetchLegacyData(url) {
       const isAss = format === 'ass' || format === 'ssa' || rawName.toLowerCase().includes('.ass') || rawName.toLowerCase().includes('.ssa');
       const finalExt = isAss ? 'ass' : 'srt';
 
+      // الخدعة: تحويل رابط الضغط إلى رابط مباشر للترجمة لتجاوز البروكسي
+      const directUrl = downloadLink.replace(/\.gz$/i, '') + '.' + finalExt;
+
       results.push({
-        url: downloadLink,
+        url: directUrl,
         lang: 'ara',
         format: finalExt,
         ext: finalExt,
@@ -246,11 +249,19 @@ async function getOpenSubtitles({ imdbId, season, episode, type, apiKey }) {
     .flatMap(r => r.value)
     .filter(s => s && s.url);
 
-  // فلترة التكرار الذكية
   const uniqueSubs = [];
   const seenIds = new Set();
 
   for (const sub of allSubs) {
+    // تعديل الفلترة: تمرير كل ترجمات الـ ass والـ ssa بدون حذف حتى لو تشابهت، إلا إذا تطابق الرابط 100%
+    if (sub.format === 'ass' || sub.format === 'ssa') {
+      if (!seenIds.has(sub.url)) {
+        seenIds.add(sub.url);
+        uniqueSubs.push(sub);
+      }
+      continue;
+    }
+
     let fileId = sub.url;
     const match = sub.url.match(/os:\/\/(\d+)/) || sub.url.match(/\/file\/(\d+)/);
     if (match) {
