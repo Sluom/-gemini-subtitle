@@ -602,15 +602,18 @@ app.get([
 
 app.all(['/stream-proxy', '/stream-proxy.srt', '/stream-proxy.ass', '/stream-proxy.ssa'], async (req, res) => {
   if (req.method === 'OPTIONS') return res.sendStatus(200);
-  const targetUrl = req.query.url;
-  if (!targetUrl) return res.status(400).send('Missing URL');
+  const rawUrl = req.query.url;
+  if (!rawUrl) return res.status(400).send('Missing URL');
 
   try {
+    const targetUrl = new URL(rawUrl).href;
+
     const response = await axios.get(targetUrl, {
       responseType: 'arraybuffer',
       timeout: 10000,
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
       }
     });
 
@@ -630,7 +633,7 @@ app.all(['/stream-proxy', '/stream-proxy.srt', '/stream-proxy.ass', '/stream-pro
     }
 
     const fixedBuffer = fixArabicEncoding(buffer);
-    const contentCheck = fixedBuffer.slice(0, 500).toString('utf-8');
+    const contentCheck = fixedBuffer ? fixedBuffer.slice(0, 500).toString('utf-8') : '';
     const isAss = contentCheck.includes('[Script Info]') || contentCheck.includes('V4+ Styles') || req.path.endsWith('.ass') || req.path.endsWith('.ssa');
 
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -646,7 +649,8 @@ app.all(['/stream-proxy', '/stream-proxy.srt', '/stream-proxy.ass', '/stream-pro
 
     res.send(fixedBuffer);
   } catch (e) {
-    res.status(500).send('Error proxying subtitle');
+    console.error('Proxy Error for URL:', rawUrl, 'Error:', e.message);
+    res.status(500).send('Error proxying subtitle: ' + e.message);
   }
 });
 
