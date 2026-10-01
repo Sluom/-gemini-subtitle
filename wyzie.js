@@ -6,19 +6,21 @@ async function getWyzie({ imdbId, season, episode, type, apiKey }) {
   if (!imdbId || !imdbId.startsWith('tt')) return [];
 
   const activeKey = (apiKey && apiKey.length > 10) ? apiKey.trim() : DEFAULT_KEY;
-  const sources = 'opensubtitles,indexsubtitle,tvsubtitles';
+  // السر هنانة: ضفنا مصادر الأنمي القوية وكل المصادر اللي يعتمد عليها كود صاحبك
+  const sources = 'animetosho,kitsunekko,subf2m,opensubtitles,indexsubtitle,tvsubtitles,gestdown,yify';
   
   let params = `id=${imdbId}&source=${sources}&key=${activeKey}`;
   if (season != null && episode != null) {
     params += `&season=${season}&episode=${episode}`;
   }
-  params += `&language=ar`;
+  // ضفنا ara وي ar لأن بعض المصادر تستخدم الترميز الثلاثي
+  params += `&language=ar,ara`;
 
   try {
     const url = `https://sub.wyzie.io/search?${params}`;
     const res = await axios.get(url, {
       headers: { 'Accept': 'application/json' },
-      timeout: 8000
+      timeout: 12000 // زيدنا الوقت شوية حتى يلحق يسحب من كل هاي المصادر بدون ما يقطع
     });
 
     if (!Array.isArray(res.data)) return [];
