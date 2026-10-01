@@ -6,23 +6,19 @@ async function getWyzie({ imdbId, season, episode, type, apiKey }) {
   if (!imdbId || !imdbId.startsWith('tt')) return [];
 
   const activeKey = (apiKey && apiKey.length > 10) ? apiKey.trim() : DEFAULT_KEY;
-  
-  // المصادر المجانية فقط لتجنب رفض السيرفر (Error 403)
   const sources = 'opensubtitles,indexsubtitle,tvsubtitles';
   
   let params = `id=${imdbId}&source=${sources}&key=${activeKey}`;
   if (season != null && episode != null) {
     params += `&season=${season}&episode=${episode}`;
   }
-  
-  // دعم الترميز الثنائي والثلاثي للغة
-  params += `&language=ar,ara`;
+  params += `&language=ar`;
 
   try {
     const url = `https://sub.wyzie.io/search?${params}`;
     const res = await axios.get(url, {
       headers: { 'Accept': 'application/json' },
-      timeout: 10000 
+      timeout: 8000
     });
 
     if (!Array.isArray(res.data)) return [];
