@@ -6,21 +6,23 @@ async function getWyzie({ imdbId, season, episode, type, apiKey }) {
   if (!imdbId || !imdbId.startsWith('tt')) return [];
 
   const activeKey = (apiKey && apiKey.length > 10) ? apiKey.trim() : DEFAULT_KEY;
-  // السر هنانة: ضفنا مصادر الأنمي القوية وكل المصادر اللي يعتمد عليها كود صاحبك
-  const sources = 'animetosho,kitsunekko,subf2m,opensubtitles,indexsubtitle,tvsubtitles,gestdown,yify';
+  
+  // المصادر المجانية فقط لتجنب رفض السيرفر (Error 403)
+  const sources = 'opensubtitles,indexsubtitle,tvsubtitles';
   
   let params = `id=${imdbId}&source=${sources}&key=${activeKey}`;
   if (season != null && episode != null) {
     params += `&season=${season}&episode=${episode}`;
   }
-  // ضفنا ara وي ar لأن بعض المصادر تستخدم الترميز الثلاثي
+  
+  // دعم الترميز الثنائي والثلاثي للغة
   params += `&language=ar,ara`;
 
   try {
     const url = `https://sub.wyzie.io/search?${params}`;
     const res = await axios.get(url, {
       headers: { 'Accept': 'application/json' },
-      timeout: 12000 // زيدنا الوقت شوية حتى يلحق يسحب من كل هاي المصادر بدون ما يقطع
+      timeout: 10000 
     });
 
     if (!Array.isArray(res.data)) return [];
